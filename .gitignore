@@ -1,0 +1,34 @@
+# ── Dépendances ───────────────────────────────────────────────
+node_modules/
+renderer/node_modules/
+
+# ── Builds ────────────────────────────────────────────────────
+dist/
+renderer/dist/
+*.exe
+*.blockmap
+
+# ── Fichiers générés ──────────────────────────────────────────
+assets/icon.ico
+
+# ── Environnement / secrets ───────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+*.ppk
+
+# ── Données locales de l'app (ne jamais committer) ────────────
+*.enc
+ssh-manager-connections.json
+ssh-manager-meta.json
+
+# ── IDE / OS ──────────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.log
+
+# ── Claude Code (config locale) ───────────────────────────────
+.claude/settings.local.json
