@@ -6,7 +6,7 @@
 
 <p align="center">
   Gestionnaire de connexions <strong>SSH / SFTP / FTP</strong> pour Windows 11,<br/>
-  avec terminal intégré et stockage chiffré des identifiants.
+  avec terminal intégré, stockage chiffré des identifiants et mots de passes.
 </p>
 
 ---
