@@ -32,3 +32,7 @@ Desktop.ini
 
 # ── Claude Code (config locale) ───────────────────────────────
 .claude/settings.local.json
+
+# ── Instructions de dev locales (privées) ─────────────────────
+CLAUDE.md
+.claude/
