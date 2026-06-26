@@ -8,12 +8,24 @@ interface Props {
   defaultGroup?: string;
   onSave: (conn: Connection) => void;
   onClose: () => void;
+  onDelete?: (id: string) => void;
 }
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = { ssh: 22, sftp: 22, ftp: 21 };
 
-export default function ConnectionForm({ connection, newId, groups, defaultGroup, onSave, onClose }: Props) {
+export default function ConnectionForm({ connection, newId, groups, defaultGroup, onSave, onClose, onDelete }: Props) {
   const isEdit = !!connection;
+
+  const handleDelete = () => {
+    if (!connection || !onDelete) return;
+    const confirmed = window.confirm(
+      `Supprimer la connexion « ${connection.name} » ?\n\nCette action est irréversible.`
+    );
+    if (confirmed) {
+      onDelete(connection.id);
+      onClose();
+    }
+  };
 
   const [name, setName] = useState(connection?.name ?? '');
   const [type, setType] = useState<ConnectionType>(connection?.type ?? 'ssh');
@@ -226,6 +238,11 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
           )}
 
           <div className="modal-actions">
+            {isEdit && onDelete && (
+              <button type="button" className="btn-danger" onClick={handleDelete} style={{ marginRight: 'auto' }}>
+                🗑 Supprimer
+              </button>
+            )}
             <button type="button" className="btn-secondary" onClick={onClose}>Annuler</button>
             <button type="submit" className="btn-primary">{isEdit ? '✓ Enregistrer' : '+ Créer'}</button>
           </div>

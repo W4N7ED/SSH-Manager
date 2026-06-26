@@ -64,8 +64,18 @@ const RECENTS_KEY       = 'sshmanager-recents';
 const MAX_RECENTS       = 15;
 
 let tabCounter = 0;
-const newTabId  = () => 'tab-' + (++tabCounter);
+// Includes a timestamp so a session id can never collide with one left over in
+// a previously-saved store (defense in depth alongside persistConnections).
+const newTabId  = () => 'tab-' + Date.now().toString(36) + '-' + (++tabCounter);
 const newConnId = () => 'conn-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+
+// Active tab sessions live in the same `connections` array with a transient
+// 'tab-*' id. They must NEVER be written to disk: persisting them, combined with
+// tabCounter resetting on restart, causes id collisions where opening a saved
+// connection resolves to a stale ghost session. Always strip them before saving.
+const isSessionId = (id: string) => id.startsWith('tab-');
+const persistConnections = (list: Connection[]) =>
+  window.electronAPI.connectionsSave(list.filter(c => !isSessionId(c.id)));
 
 const loadGroups      = (): string[]                => { try { return JSON.parse(localStorage.getItem(GROUPS_KEY)       ?? '[]');  } catch { return []; } };
 const loadGroupColors = (): Record<string, string>  => { try { return JSON.parse(localStorage.getItem(GROUP_COLORS_KEY) ?? '{}');  } catch { return {}; } };
@@ -158,9 +168,15 @@ export default function App() {
 
   const loadConnections = () => {
     window.electronAPI.connectionsGetAll().then(loaded => {
-      setConnections(loaded);
+      // Repair stores polluted by an earlier bug that persisted tab sessions:
+      // drop any leftover 'tab-*' entries and rewrite the cleaned list to disk.
+      const clean = loaded.filter((c: Connection) => !isSessionId(c.id));
+      if (clean.length !== loaded.length) {
+        window.electronAPI.connectionsSave(clean);
+      }
+      setConnections(clean);
       const stored = loadGroups();
-      const fromConns = loaded.map((c: Connection) => c.group).filter(Boolean) as string[];
+      const fromConns = clean.map((c: Connection) => c.group).filter(Boolean) as string[];
       const merged = Array.from(new Set([...stored, ...fromConns]));
       setGroups(merged);
       saveGroupsLS(merged);
@@ -213,7 +229,7 @@ export default function App() {
     } catch {}
     setConnections(prev => {
       const next = prev.map(c => c.group === oldName ? { ...c, group: newName } : c);
-      window.electronAPI.connectionsSave(next);
+      persistConnections(next);
       return next;
     });
   }, []);
@@ -237,7 +253,7 @@ export default function App() {
     } catch {}
     setConnections(prev => {
       const next = prev.map(c => c.group === name ? { ...c, group: undefined } : c);
-      window.electronAPI.connectionsSave(next);
+      persistConnections(next);
       return next;
     });
   }, []);
@@ -255,7 +271,7 @@ export default function App() {
     setConnections(prev => {
       const exists = prev.find(c => c.id === conn.id);
       const next = exists ? prev.map(c => c.id === conn.id ? conn : c) : [...prev, conn];
-      window.electronAPI.connectionsSave(next);
+      persistConnections(next);
       return next;
     });
     setFormOpen(false);
@@ -272,7 +288,7 @@ export default function App() {
         window.electronAPI.sshForgetHostKey({ host: removed.host, port: removed.port || 22 });
       }
       const next = prev.filter(c => c.id !== id);
-      window.electronAPI.connectionsSave(next);
+      persistConnections(next);
       return next;
     });
   }, []);
@@ -280,7 +296,7 @@ export default function App() {
   const handleToggleFavorite = useCallback((id: string) => {
     setConnections(prev => {
       const next = prev.map(c => c.id === id ? { ...c, favorite: !c.favorite } : c);
-      window.electronAPI.connectionsSave(next);
+      persistConnections(next);
       return next;
     });
   }, []);
@@ -327,7 +343,7 @@ export default function App() {
       const existingIds = new Set(prev.map(c => c.id));
       const toAdd = incoming.filter(c => !existingIds.has(c.id));
       const next = [...prev, ...toAdd];
-      window.electronAPI.connectionsSave(next);
+      persistConnections(next);
       showToast(`${toAdd.length} connexion(s) importée(s)`);
       return next;
     });
@@ -378,7 +394,7 @@ export default function App() {
         const exists = prev.find(c => c.id === conn.id);
         if (!exists) return prev;
         const next = prev.map(c => c.id === conn.id ? { ...c, password } : c);
-        window.electronAPI.connectionsSave(next);
+        persistConnections(next);
         return next;
       });
     }
@@ -710,7 +726,8 @@ export default function App() {
 
       {formOpen && (
         <ConnectionForm connection={editingConn} newId={newConnId()} groups={groups} defaultGroup={formDefaultGroup}
-          onSave={handleSaveConnection} onClose={() => { setFormOpen(false); setEditingConn(null); setFormDefaultGroup(undefined); }} />
+          onSave={handleSaveConnection} onDelete={handleDeleteConnection}
+          onClose={() => { setFormOpen(false); setEditingConn(null); setFormDefaultGroup(undefined); }} />
       )}
     </div>
   );
