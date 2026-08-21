@@ -1,6 +1,6 @@
 {
   "name": "ssh-manager",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "SSH/FTP/SFTP Connection Manager for Windows 11",
   "license": "GPL-3.0",
   "main": "main.js",
@@ -45,7 +45,8 @@
       ]
     },
     "portable": {
-      "artifactName": "${productName} Portable ${version}.${ext}"
+      "artifactName": "${productName} Portable ${version}.${ext}",
+      "unpackDirName": "SSHManager"
     },
     "nsis": {
       "oneClick": false,
@@ -55,6 +56,12 @@
       "shortcutName": "SSH Manager",
       "include": "build/installer.nsh"
     },
+    "extraResources": [
+      {
+        "from": "scripts/write-private-clipboard.ps1",
+        "to": "scripts/write-private-clipboard.ps1"
+      }
+    ],
     "files": [
       "main.js",
       "preload.js",
