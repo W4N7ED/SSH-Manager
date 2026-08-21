@@ -117,7 +117,10 @@ npm run build:portable   # Version portable uniquement
 npm run pack             # Dossier décompressé (debug) → dist/win-unpacked/
 ```
 
-L'icône est régénérée automatiquement à chaque build à partir de `assets/icon.png`.
+Les icônes sont régénérées automatiquement à chaque build à partir des vecteurs
+`assets/icon.svg` (grand format) et `assets/icon-small.svg` (variante 16 et 24 px,
+au trait épaissi pour rester lisible une fois réduite). Le build en dérive
+`assets/icon.png` puis `assets/icon.ico`.
 
 ---
 

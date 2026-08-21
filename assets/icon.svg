@@ -1,0 +1,26 @@
+<!--
+  SSH Manager — marque de l'application.
+  Piste « Caret » de la planche de logos : un chevron d'invite de commande et
+  son curseur, sur le violet de la direction graphique Minuit.
+
+  Source de vérité de l'icône : assets/icon.png et assets/icon.ico en sont
+  dérivés par `npm run build:icon`.
+
+  Géométrie reprise du gabarit 128 px de la planche, mise à l'échelle ×8, puis
+  décalée de 41 unités vers la gauche : le chevron ne remplit pas toute sa boîte
+  de 24 unités, si bien qu'un centrage géométrique laisse la composition
+  visiblement décalée à droite. Le décalage centre l'encre réellement visible.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="240" fill="#9a6bff"/>
+
+  <!-- Chevron : polyline d'origine (24 unités), mise à l'échelle 368/24 -->
+  <g transform="translate(207 328) scale(15.333333)"
+     fill="none" stroke="#150e26" stroke-width="3.2"
+     stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="7 6 14 12 7 18"/>
+  </g>
+
+  <!-- Curseur -->
+  <rect x="663" y="376" width="72" height="272" rx="24" fill="#150e26"/>
+</svg>
