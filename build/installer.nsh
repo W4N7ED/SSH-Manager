@@ -12,16 +12,18 @@
 ; D'où le garde `${ifNot} ${isUpdated}` : ces questions n'ont de sens que lors
 ; d'une désinstallation demandée par l'utilisateur.
 ; Le `/SD IDNO` est une sécurité supplémentaire : en mode silencieux, NSIS
-; retiendra « Non » au lieu d'attendre une réponse.
+; retiendra « Non » au lieu d'attendre une réponse. Attention à sa place —
+; NSIS l'attend après le texte du message, pas avant, sinon le message est lu
+; comme un nom de label et la compilation échoue.
 ; ─────────────────────────────────────────────────────────────────────────────
 
 !macro customUnInstall
   ${ifNot} ${isUpdated}
 
     ; ── Proposer une sauvegarde des connexions ───────────────────────────────
-    MessageBox MB_YESNO|MB_ICONQUESTION /SD IDNO \
+    MessageBox MB_YESNO|MB_ICONQUESTION \
       "Voulez-vous exporter vos connexions SSH/FTP avant la désinstallation ?$\r$\n$\r$\nCela vous permettra de les restaurer sur une autre machine.$\r$\n$\r$\nCliquez OUI pour lancer l'export, NON pour désinstaller directement." \
-      IDNO skip_export
+      /SD IDNO IDNO skip_export
 
       ; ExecWait attend que l'appli se ferme avant de poursuivre
       ExecWait '"$INSTDIR\SSH Manager.exe" --pre-uninstall-export'
@@ -29,9 +31,9 @@
     skip_export:
 
     ; ── Proposer la suppression des données utilisateur ──────────────────────
-    MessageBox MB_YESNO|MB_ICONQUESTION /SD IDNO \
+    MessageBox MB_YESNO|MB_ICONQUESTION \
       "Voulez-vous supprimer toutes les données enregistrées (connexions, clés chiffrées) ?$\r$\n$\r$\nCette action est irréversible.$\r$\n$\r$\nCliquez NON pour les conserver (utile si vous réinstallez plus tard)." \
-      IDNO keep_data
+      /SD IDNO IDNO keep_data
 
       ; Fermer l'application si elle tourne encore : des fichiers verrouillés
       ; (Local Storage, caches) empêcheraient la suppression du dossier.
