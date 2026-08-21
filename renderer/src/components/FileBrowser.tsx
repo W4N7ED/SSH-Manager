@@ -1,12 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Tab, Connection } from '../types';
-
-interface FileEntry {
-  name: string;
-  type: string;
-  size: number;
-  modifyTime?: number;
-}
 
 interface Props {
   tab: Tab;
@@ -27,6 +20,19 @@ function formatDate(ts?: number): string {
   return new Date(ts * 1000).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
 }
 
+/** "rwxr-x---" from whichever shape the protocol returned, or "—". */
+function formatRights(entry: FileEntry): string {
+  if (entry.rights) return `${entry.rights.user}${entry.rights.group}${entry.rights.other}`;
+  if (entry.permissions) {
+    const triplet = (bits: number) =>
+      (bits & 4 ? 'r' : '-') + (bits & 2 ? 'w' : '-') + (bits & 1 ? 'x' : '-');
+    return triplet(entry.permissions.user) + triplet(entry.permissions.group) + triplet(entry.permissions.world);
+  }
+  return '—';
+}
+
+const isDirectory = (entry: FileEntry) => entry.type === 'd' || entry.type === 'directory';
+
 export default function FileBrowser({ tab, connection, onStatusChange, onClose }: Props) {
   const [currentPath, setCurrentPath] = useState('/');
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -35,13 +41,13 @@ export default function FileBrowser({ tab, connection, onStatusChange, onClose }
   const [selected, setSelected] = useState<string | null>(null);
   const [newFolderMode, setNewFolderMode] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
   const isFtp = tab.connectionType === 'ftp';
 
-  const showMsg = (msg: string, isErr = false) => {
-    setMessage((isErr ? '⚠ ' : '✓ ') + msg);
-    setTimeout(() => setMessage(null), 3000);
+  const showMsg = (text: string, ok = true) => {
+    setMessage({ text, ok });
+    setTimeout(() => setMessage(null), 4000);
   };
 
   const connect = useCallback(async () => {
@@ -69,14 +75,14 @@ export default function FileBrowser({ tab, connection, onStatusChange, onClose }
 
     if (result.success && result.list) {
       const sorted = [...result.list].sort((a, b) => {
-        if (a.type === 'd' && b.type !== 'd') return -1;
-        if (a.type !== 'd' && b.type === 'd') return 1;
+        if (isDirectory(a) && !isDirectory(b)) return -1;
+        if (!isDirectory(a) && isDirectory(b)) return 1;
         return a.name.localeCompare(b.name);
       });
       setFiles(sorted);
       setCurrentPath(path);
     } else {
-      showMsg(result.error ?? 'Impossible de lister le répertoire', true);
+      showMsg(result.error ?? 'Impossible de lister le répertoire', false);
     }
     setLoading(false);
   }, [tab.id, isFtp]);
@@ -89,36 +95,35 @@ export default function FileBrowser({ tab, connection, onStatusChange, onClose }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const navigate = (entry: FileEntry) => {
-    if (entry.type === 'd' || entry.type === 'directory') {
-      const next = currentPath.endsWith('/') ? currentPath + entry.name : currentPath + '/' + entry.name;
-      listDir(next);
-    }
+  const pathSegments = currentPath.split('/').filter(Boolean);
+
+  const remotePathOf = (name: string) =>
+    currentPath.endsWith('/') ? currentPath + name : currentPath + '/' + name;
+
+  const openEntry = (entry: FileEntry) => {
+    if (isDirectory(entry)) listDir(remotePathOf(entry.name));
   };
 
   const goUp = () => {
     if (currentPath === '/') return;
-    const parts = currentPath.split('/').filter(Boolean);
-    parts.pop();
-    listDir('/' + parts.join('/') || '/');
+    const parts = pathSegments.slice(0, -1);
+    listDir('/' + parts.join('/'));
   };
 
-  const goPath = (seg: string[]) => {
-    listDir('/' + seg.join('/'));
-  };
+  const goToSegment = (index: number) => listDir('/' + pathSegments.slice(0, index + 1).join('/'));
 
-  const pathSegments = currentPath.split('/').filter(Boolean);
+  const totalSize = useMemo(
+    () => files.filter(f => !isDirectory(f)).reduce((sum, f) => sum + (f.size ?? 0), 0),
+    [files],
+  );
 
   const download = async () => {
     if (!selected) return;
-    const remotePath = currentPath.endsWith('/')
-      ? currentPath + selected
-      : currentPath + '/' + selected;
     const result = isFtp
-      ? await window.electronAPI.ftpDownload({ tabId: tab.id, remotePath })
-      : await window.electronAPI.sftpDownload({ tabId: tab.id, remotePath });
+      ? await window.electronAPI.ftpDownload({ tabId: tab.id, remotePath: remotePathOf(selected) })
+      : await window.electronAPI.sftpDownload({ tabId: tab.id, remotePath: remotePathOf(selected) });
     if (result.success) showMsg('Téléchargement terminé');
-    else if (result.error) showMsg(result.error, true);
+    else if (result.error) showMsg(result.error, false);
   };
 
   const upload = async () => {
@@ -126,36 +131,31 @@ export default function FileBrowser({ tab, connection, onStatusChange, onClose }
     const result = isFtp
       ? await window.electronAPI.ftpUpload({ tabId: tab.id, remotePath })
       : await window.electronAPI.sftpUpload({ tabId: tab.id, remotePath });
-    if (result.success) { showMsg('Upload terminé'); listDir(currentPath); }
-    else if (result.error) showMsg(result.error, true);
+    if (result.success) { showMsg('Envoi terminé'); listDir(currentPath); }
+    else if (result.error) showMsg(result.error, false);
   };
 
   const deleteEntry = async () => {
     if (!selected) return;
     const entry = files.find(f => f.name === selected);
     if (!entry) return;
-    if (!confirm(`Supprimer "${selected}" ?`)) return;
-    const remotePath = currentPath.endsWith('/')
-      ? currentPath + selected
-      : currentPath + '/' + selected;
-    const isDir = entry.type === 'd' || entry.type === 'directory';
+    if (!confirm(`Supprimer « ${selected} » ?`)) return;
+    const isDir = isDirectory(entry);
     const result = isFtp
-      ? await window.electronAPI.ftpDelete({ tabId: tab.id, remotePath, isDir })
-      : await window.electronAPI.sftpDelete({ tabId: tab.id, remotePath, isDir });
+      ? await window.electronAPI.ftpDelete({ tabId: tab.id, remotePath: remotePathOf(selected), isDir })
+      : await window.electronAPI.sftpDelete({ tabId: tab.id, remotePath: remotePathOf(selected), isDir });
     if (result.success) { showMsg('Supprimé'); listDir(currentPath); }
-    else showMsg(result.error ?? 'Erreur suppression', true);
+    else showMsg(result.error ?? 'Erreur de suppression', false);
   };
 
   const createFolder = async () => {
-    if (!newFolderName.trim()) return;
-    const remotePath = currentPath.endsWith('/')
-      ? currentPath + newFolderName.trim()
-      : currentPath + '/' + newFolderName.trim();
+    const name = newFolderName.trim();
+    if (!name) return;
     const result = isFtp
-      ? await window.electronAPI.ftpMkdir({ tabId: tab.id, remotePath })
-      : await window.electronAPI.sftpMkdir({ tabId: tab.id, remotePath });
+      ? await window.electronAPI.ftpMkdir({ tabId: tab.id, remotePath: remotePathOf(name) })
+      : await window.electronAPI.sftpMkdir({ tabId: tab.id, remotePath: remotePathOf(name) });
     if (result.success) { showMsg('Dossier créé'); listDir(currentPath); }
-    else showMsg(result.error ?? 'Erreur création dossier', true);
+    else showMsg(result.error ?? 'Erreur de création du dossier', false);
     setNewFolderMode(false);
     setNewFolderName('');
   };
@@ -166,43 +166,42 @@ export default function FileBrowser({ tab, connection, onStatusChange, onClose }
         <div className="error-icon">⚠</div>
         <h3>Connexion échouée</h3>
         <p>{error}</p>
-        <button className="btn-primary" onClick={() => connect().then(() => listDir('/'))}>
-          Réessayer
-        </button>
-        <button className="btn-secondary" onClick={onClose}>Fermer</button>
+        <div className="term-error-actions">
+          <button className="btn-primary" onClick={() => connect().then(() => listDir('/'))}>Réessayer</button>
+          <button className="btn-secondary" onClick={onClose}>Fermer</button>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="filebrowser">
-      {/* Toolbar */}
-      <div className="fb-toolbar">
-        <button className="btn-toolbar" onClick={goUp} disabled={currentPath === '/'}>↑ Parent</button>
-        <button className="btn-toolbar" onClick={() => listDir(currentPath)}>↺ Actualiser</button>
-        <button className="btn-toolbar" onClick={upload}>⬆ Upload</button>
-        <button className="btn-toolbar" onClick={download} disabled={!selected}>⬇ Télécharger</button>
-        <button className="btn-toolbar" onClick={() => setNewFolderMode(true)}>+ Dossier</button>
-        <button className="btn-toolbar danger" onClick={deleteEntry} disabled={!selected}>✕ Supprimer</button>
-        <div className="fb-spacer" />
-        <button className="btn-toolbar danger" onClick={onClose}>✕ Fermer</button>
+      <div className="fb-header">
+        <button className="btn-round" title="Dossier parent" onClick={goUp} disabled={currentPath === '/'}>↑</button>
+        <button className="btn-round" title="Actualiser" onClick={() => listDir(currentPath)}>↺</button>
+
+        <div className="fb-breadcrumb">
+          <span className="bc-item" onClick={() => listDir('/')}>/</span>
+          {pathSegments.map((segment, index) => (
+            <React.Fragment key={index}>
+              {index > 0 && <span className="bc-sep">/</span>}
+              <span
+                className={`bc-item ${index === pathSegments.length - 1 ? 'current' : ''}`}
+                onClick={() => goToSegment(index)}
+              >{segment}</span>
+            </React.Fragment>
+          ))}
+        </div>
+
+        <span className="fb-spacer" />
+
+        <button className="btn-toolbar" onClick={upload}>Envoyer</button>
+        <button className="btn-toolbar" onClick={download} disabled={!selected}>Télécharger</button>
+        <button className="btn-toolbar" onClick={() => setNewFolderMode(true)}>Nouveau dossier</button>
+        <button className="btn-toolbar danger" onClick={deleteEntry} disabled={!selected}>Supprimer</button>
+        <button className="btn-round" title="Fermer l'onglet" onClick={onClose}>✕</button>
       </div>
 
-      {/* Breadcrumb */}
-      <div className="fb-breadcrumb">
-        <span className="bc-item" onClick={() => listDir('/')}>/</span>
-        {pathSegments.map((seg, i) => (
-          <React.Fragment key={i}>
-            <span className="bc-sep">/</span>
-            <span
-              className="bc-item"
-              onClick={() => goPath(pathSegments.slice(0, i + 1))}
-            >{seg}</span>
-          </React.Fragment>
-        ))}
-      </div>
-
-      {/* New folder input */}
       {newFolderMode && (
         <div className="fb-newdir">
           <input
@@ -218,50 +217,55 @@ export default function FileBrowser({ tab, connection, onStatusChange, onClose }
         </div>
       )}
 
-      {/* Message */}
-      {message && <div className={`fb-message ${message.startsWith('⚠') ? 'error' : 'success'}`}>{message}</div>}
+      <div className="fb-columns">
+        <span>Nom</span><span>Taille</span><span>Modifié</span><span>Droits</span>
+      </div>
 
-      {/* File list */}
       {loading ? (
-        <div className="fb-loading">Chargement...</div>
+        <div className="fb-loading">Chargement…</div>
       ) : (
-        <div className="fb-table-wrap">
-          <table className="fb-table">
-            <thead>
-              <tr>
-                <th>Nom</th>
-                <th>Taille</th>
-                <th>Modifié</th>
-                <th>Type</th>
-              </tr>
-            </thead>
-            <tbody>
-              {files.map(f => {
-                const isDir = f.type === 'd' || f.type === 'directory';
-                return (
-                  <tr
-                    key={f.name}
-                    className={selected === f.name ? 'selected' : ''}
-                    onClick={() => setSelected(f.name)}
-                    onDoubleClick={() => isDir ? navigate(f) : undefined}
-                  >
-                    <td className="fb-name">
-                      <span className="fb-file-icon">{isDir ? '📁' : '📄'}</span>
-                      {f.name}
-                    </td>
-                    <td className="fb-size">{isDir ? '—' : formatSize(f.size)}</td>
-                    <td className="fb-date">{formatDate(f.modifyTime)}</td>
-                    <td className="fb-type">{isDir ? 'Dossier' : 'Fichier'}</td>
-                  </tr>
-                );
-              })}
-              {files.length === 0 && (
-                <tr><td colSpan={4} className="fb-empty">Dossier vide</td></tr>
-              )}
-            </tbody>
-          </table>
+        <div className="fb-rows">
+          {currentPath !== '/' && (
+            <div className="fb-row fb-row--parent" onDoubleClick={goUp}>
+              <span className="fb-cell-name mono">..</span>
+              <span /><span /><span />
+            </div>
+          )}
+
+          {files.map(file => {
+            const directory = isDirectory(file);
+            return (
+              <div
+                key={file.name}
+                className={`fb-row ${selected === file.name ? 'selected' : ''}`}
+                onClick={() => setSelected(file.name)}
+                onDoubleClick={() => openEntry(file)}
+              >
+                <span className="fb-cell-name">
+                  <span className={`fb-marker ${directory ? 'fb-marker--dir' : ''}`} />
+                  {file.name}
+                </span>
+                <span className="fb-cell-size">{directory ? '—' : formatSize(file.size)}</span>
+                <span className="fb-cell-date">{formatDate(file.modifyTime)}</span>
+                <span className="fb-cell-rights">{formatRights(file)}</span>
+              </div>
+            );
+          })}
+
+          {files.length === 0 && <div className="fb-empty">Dossier vide</div>}
         </div>
       )}
+
+      <div className="fb-footer">
+        <span>{files.length} élément{files.length > 1 ? 's' : ''} · {formatSize(totalSize)}</span>
+        {selected && <span>1 sélectionné</span>}
+        <span className="fb-spacer" />
+        {message && (
+          <span className={message.ok ? 'fb-footer-ok' : 'fb-footer-err'}>
+            {message.ok ? '✓' : '⚠'} {message.text}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

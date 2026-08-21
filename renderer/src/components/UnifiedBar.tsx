@@ -1,32 +1,21 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { Connection, ConnectionType } from '../types';
 
-export type TileSize = 'xl' | 'md' | 'sm' | 'xs';
-
-const TILE_SIZE_KEY = 'sshmanager-tile-size';
-export const loadTileSize = (): TileSize => {
-  const v = localStorage.getItem(TILE_SIZE_KEY);
-  return (v === 'xl' || v === 'md' || v === 'sm' || v === 'xs') ? v : 'md';
-};
-
-const TILE_SIZE_OPTIONS: { value: TileSize; label: string; title: string; icon: string }[] = [
-  { value: 'xl', label: 'XL', title: 'Grand',      icon: '⬛' },
-  { value: 'md', label: 'M',  title: 'Moyen',      icon: '▪' },
-  { value: 'sm', label: 'S',  title: 'Petit',      icon: '▫' },
-  { value: 'xs', label: 'XS', title: 'Très petit', icon: '·' },
-];
-
 interface Props {
   groups: string[];
-  /** Called when the user wants to filter the grid by type (or 'all') */
+  currentFilter: 'all' | ConnectionType;
   onFilterChange: (filter: 'all' | ConnectionType) => void;
-  /** Called when the user initiates a quick connection */
+  /** Free-text filter applied to the connection list. */
+  search: string;
+  onSearchChange: (search: string) => void;
+  /** Called when the user initiates a quick connection from the address field. */
   onConnect: (conn: Connection) => void;
   /** Called when the user saves a quick-connect as a named connection */
   onSaveConnection: (conn: Connection) => void;
-  currentFilter: 'all' | ConnectionType;
-  tileSize: TileSize;
-  onTileSizeChange: (size: TileSize) => void;
+  onNewConnection: () => void;
+  onOpenPalette: () => void;
+  onToggleRail: () => void;
+  railCollapsed: boolean;
 }
 
 const DEFAULT_PORTS: Record<ConnectionType, number> = { ssh: 22, sftp: 22, ftp: 21 };
@@ -64,10 +53,9 @@ function parseInput(raw: string): { username: string; host: string; port: number
 }
 
 export default function UnifiedBar({
-  groups, onFilterChange, onConnect, onSaveConnection, currentFilter,
-  tileSize, onTileSizeChange,
+  groups, currentFilter, onFilterChange, search, onSearchChange,
+  onConnect, onSaveConnection, onNewConnection, onOpenPalette, onToggleRail, railCollapsed,
 }: Props) {
-  const [input, setInput]               = useState('');
   const [showSave, setShowSave]         = useState(false);
   const [lastConn, setLastConn]         = useState<Connection | null>(null);
   const [saveName, setSaveName]         = useState('');
@@ -77,20 +65,12 @@ export default function UnifiedBar({
   const [saveFavorite, setSaveFavorite] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const isConnectMode = looksLikeHost(input);
+  const isConnectMode = looksLikeHost(search);
   // The type used for quick-connect: if a specific type is selected use it, otherwise default SSH
   const connectType: ConnectionType = currentFilter === 'all' ? 'ssh' : currentFilter;
 
-  const handleInputChange = useCallback((val: string) => {
-    setInput(val);
-    // If not a host address, propagate as a search filter in real time
-    if (!looksLikeHost(val)) {
-      // The parent ConnectionGrid handles filtering via its own prop
-    }
-  }, []);
-
   const handleConnect = useCallback(() => {
-    const { username, host, port } = parseInput(input);
+    const { username, host, port } = parseInput(search);
     if (!host) { inputRef.current?.focus(); return; }
 
     const conn: Connection = {
@@ -111,7 +91,7 @@ export default function UnifiedBar({
     setSaveFavorite(false);
     setLastConn(conn);
     setShowSave(true);
-  }, [input, connectType, onConnect]);
+  }, [search, connectType, onConnect]);
 
   const handleSave = useCallback(() => {
     if (!lastConn) return;
@@ -126,80 +106,66 @@ export default function UnifiedBar({
       favorite: saveFavorite || undefined,
     });
     setShowSave(false);
-    setInput('');
-  }, [lastConn, saveName, saveGroup, saveNewGroup, saveNewGroupMode, saveFavorite, onSaveConnection]);
+    onSearchChange('');
+  }, [lastConn, saveName, saveGroup, saveNewGroup, saveNewGroupMode, saveFavorite, onSaveConnection, onSearchChange]);
 
   return (
     <>
       <div className="unified-bar">
-        {/* ── Filtres de type ────────────────────────────────── */}
-        <div className="unified-type-tabs">
-          {(['all', 'ssh', 'sftp', 'ftp'] as const).map(t => (
-            <button
-              key={t}
-              className={`unified-type-btn ${currentFilter === t ? 'active' : ''}`}
-              onClick={() => onFilterChange(t)}
-              title={t === 'all' ? 'Toutes les connexions' : t.toUpperCase()}
-            >
-              {t === 'all' ? 'Tous' : t.toUpperCase()}
-            </button>
-          ))}
-        </div>
+        <button
+          className="rail-toggle"
+          onClick={onToggleRail}
+          title={railCollapsed ? 'Afficher les groupes' : 'Masquer les groupes'}
+        >≡</button>
 
         {/* ── Champ unique : recherche ou adresse ────────────── */}
         <div className={`unified-input-wrap ${isConnectMode ? 'is-connect-mode' : ''}`}>
-          <span className="unified-input-icon">
-            {isConnectMode ? '▶' : '⌕'}
-          </span>
+          <span className="unified-input-icon">{isConnectMode ? '▶' : '⌕'}</span>
           <input
             ref={inputRef}
             className="unified-input"
             type="text"
-            placeholder="Rechercher  ou  user@host:port  ou  192.168.1.1"
-            value={input}
-            onChange={e => handleInputChange(e.target.value)}
+            placeholder="Rechercher, ou user@hôte:port pour se connecter"
+            value={search}
+            onChange={e => onSearchChange(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && isConnectMode) handleConnect(); }}
             spellCheck={false}
             autoCorrect="off"
             autoCapitalize="off"
           />
-          {input && (
+          {isConnectMode && (
             <button
-              className="unified-clear"
-              onClick={() => { setInput(''); inputRef.current?.focus(); }}
-            >✕</button>
+              className="unified-connect-btn"
+              onClick={handleConnect}
+              title={`Connecter en ${connectType.toUpperCase()}`}
+            >Connecter</button>
+          )}
+          {search && !isConnectMode && (
+            <button className="unified-clear" onClick={() => { onSearchChange(''); inputRef.current?.focus(); }}>✕</button>
           )}
         </div>
 
-        {/* ── Bouton Connecter ──────────────────────────────── */}
-        <button
-          className={`unified-connect-btn ${isConnectMode ? 'active' : ''}`}
-          onClick={handleConnect}
-          disabled={!isConnectMode}
-          title={isConnectMode ? `Connecter en ${connectType.toUpperCase()}` : 'Entrez une adresse pour vous connecter'}
-        >
-          ▶ Connecter
-        </button>
-
-        {/* ── Sélecteur de taille de tuile ─────────────────── */}
-        <div className="tile-size-picker" title="Taille des tuiles">
-          {TILE_SIZE_OPTIONS.map(opt => (
+        {/* ── Filtres de type ────────────────────────────────── */}
+        <div className="unified-type-tabs">
+          {(['all', 'ssh', 'sftp', 'ftp'] as const).map(type => (
             <button
-              key={opt.value}
-              className={`tile-size-picker-btn ${tileSize === opt.value ? 'active' : ''}`}
-              onClick={() => {
-                localStorage.setItem(TILE_SIZE_KEY, opt.value);
-                onTileSizeChange(opt.value);
-              }}
-              title={opt.title}
+              key={type}
+              className={`unified-type-btn ${currentFilter === type ? 'active' : ''}`}
+              onClick={() => onFilterChange(type)}
+              title={type === 'all' ? 'Toutes les connexions' : type.toUpperCase()}
             >
-              {opt.label}
+              {type === 'all' ? 'Tous' : type.toUpperCase()}
             </button>
           ))}
         </div>
+
+        <span className="unified-spacer" />
+
+        <button className="palette-chip" onClick={onOpenPalette} title="Palette de commandes">Ctrl K</button>
+        <button className="unified-new-btn" onClick={onNewConnection}>+ Nouvelle connexion</button>
       </div>
 
-      {/* ── Bandeau "enregistrer la connexion rapide" ────────── */}
+      {/* ── Bandeau « enregistrer la connexion rapide » ────────── */}
       {showSave && lastConn && (
         <div className="qc-save-banner">
           <span className="qc-save-icon">✓</span>

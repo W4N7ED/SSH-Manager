@@ -19,6 +19,7 @@ interface Props {
   tab: Tab;
   connection: Connection;
   terminalTheme: TerminalThemeConfig;
+  isActive?: boolean;
   onStatusChange: (tabId: string, status: Tab['status'], error?: string) => void;
   onClose: () => void;
   onRetry?: () => void;
@@ -118,7 +119,7 @@ function ThemePicker({
 // ── Main component ────────────────────────────────────────────────────────────
 const TerminalTab = forwardRef<TerminalTabHandle, Props>(
   ({
-    tab, connection, terminalTheme, onStatusChange, onClose, onRetry,
+    tab, connection, terminalTheme, isActive, onStatusChange, onClose, onRetry,
     onSyncInput, onThemeChange, synced, compact,
   }, ref) => {
     const containerRef   = useRef<HTMLDivElement>(null);
@@ -131,6 +132,8 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
 
     const [errorOverlay, setErrorOverlay] = useState<string | null>(null);
     const [showThemePicker, setShowThemePicker] = useState(false);
+    /** Current grid size, mirrored in the toolbar (e.g. 80×24). */
+    const [dimensions, setDimensions] = useState<{ cols: number; rows: number } | null>(null);
 
     useImperativeHandle(ref, () => ({
       injectData: (data: string) => {
@@ -160,11 +163,12 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
       const theme = terminalTheme ?? DEFAULT_TERMINAL_THEME;
 
       const term = new Terminal({
-        fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
+        fontFamily: '"JetBrains Mono", "Cascadia Code", "Consolas", monospace',
         fontSize: compact ? 12 : 14,
         lineHeight: 1.3,
         cursorBlink: true,
         cursorStyle: 'block',
+        rescaleOverlappingGlyphs: true,
         theme: buildXtermTheme(theme),
         allowTransparency: false,
         scrollback: 5000,
@@ -176,16 +180,19 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
       term.loadAddon(new WebLinksAddon());
       term.open(containerRef.current);
       fitAddon.fit();
+      setDimensions({ cols: term.cols, rows: term.rows });
 
       termRef.current    = term;
       fitAddonRef.current = fitAddon;
 
-      // Right-click = paste
+      // Right-click = paste. Goes through term.paste() rather than a raw SSH
+      // write: xterm normalizes Windows \r\n line endings to \r and honors the
+      // remote shell's bracketed paste mode, otherwise multi-line pastes get
+      // extra blank lines and readline side effects (e.g. malformed heredocs).
       const handleContextMenu = (e: MouseEvent) => {
         e.preventDefault();
         navigator.clipboard.readText().then(text => {
-          if (text && connectedRef.current)
-            window.electronAPI.sshWrite({ tabId: tab.id, data: text });
+          if (text && connectedRef.current) term.paste(text);
         }).catch(() => {});
       };
       containerRef.current.addEventListener('contextmenu', handleContextMenu);
@@ -212,8 +219,8 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
       });
       cleanupRef.current.push(() => onData.dispose());
 
-      // SSH data → terminal
-      const unsubData = window.electronAPI.onSshData(tab.id, (data: string) => {
+      // SSH data → terminal (raw UTF-8 bytes, decoded by xterm's streaming decoder)
+      const unsubData = window.electronAPI.onSshData(tab.id, (data: string | Uint8Array) => {
         term.write(data);
       });
       cleanupRef.current.push(unsubData);
@@ -227,6 +234,7 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
 
       // Resize
       const onResize = term.onResize(({ cols, rows }) => {
+        setDimensions({ cols, rows });
         if (connectedRef.current)
           window.electronAPI.sshResize({ tabId: tab.id, cols, rows });
       });
@@ -241,11 +249,14 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
       // Connect
       term.write(`\x1b[36mConnexion à ${connection.username}@${connection.host}:${connection.port || 22}...\x1b[0m\r\n`);
 
-      window.electronAPI.sshConnect({ tabId: tab.id, connection })
+      window.electronAPI.sshConnect({ tabId: tab.id, connection, cols: term.cols, rows: term.rows })
         .then(() => {
           connectedRef.current = true;
           setErrorOverlay(null);
           onStatusChange(tab.id, 'connected');
+          // The terminal may have been resized while the connection was being
+          // established; realign the remote PTY with the actual dimensions.
+          window.electronAPI.sshResize({ tabId: tab.id, cols: term.cols, rows: term.rows });
         })
         .catch((err: unknown) => {
           const msg = typeof err === 'string'
@@ -265,6 +276,29 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
       }
     }, [terminalTheme]);
 
+    useEffect(() => {
+      if (!isActive) return;
+
+      const fitVisibleTerminal = () => {
+        const term = termRef.current;
+        const fitAddon = fitAddonRef.current;
+        if (!term || !fitAddon) return;
+
+        try {
+          fitAddon.fit();
+          term.refresh(0, term.rows - 1);
+          if (connectedRef.current) {
+            window.electronAPI.sshResize({ tabId: tab.id, cols: term.cols, rows: term.rows });
+          }
+        } catch {}
+      };
+
+      fitVisibleTerminal();
+      const timeoutId = window.setTimeout(fitVisibleTerminal, 0);
+
+      return () => window.clearTimeout(timeoutId);
+    }, [isActive, tab.id]);
+
     const errLower   = errorOverlay?.toLowerCase() ?? '';
     const isAuthError = errorOverlay !== null && (
       errLower.includes('authentication') ||
@@ -280,56 +314,53 @@ const TerminalTab = forwardRef<TerminalTabHandle, Props>(
     };
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, position: 'relative' }}>
+      <div className="terminal-pane">
         {/* ── Toolbar ── */}
         <div className="terminal-toolbar">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {synced && <span className="sync-badge" title="Saisie synchronisée">⟳ SYNC</span>}
-            <span className="terminal-conn-label">
-              {connection.username}@{connection.host}:{connection.port || 22}
-            </span>
-          </div>
-          <div className="terminal-actions">
-            {/* Bouton thème */}
-            <div style={{ position: 'relative' }}>
-              <button
-                className={`btn-toolbar ${showThemePicker ? 'active' : ''}`}
-                title="Couleurs du terminal"
-                onClick={() => setShowThemePicker(p => !p)}
-              >
-                🎨 Thème
-              </button>
-              {showThemePicker && (
-                <ThemePicker
-                  current={terminalTheme ?? DEFAULT_TERMINAL_THEME}
-                  onSelect={handleThemeSelect}
-                  onClose={() => setShowThemePicker(false)}
-                />
-              )}
-            </div>
+          <span className="terminal-conn-label">
+            {connection.username}@{connection.host}:{connection.port || 22}
+          </span>
+          {synced && <span className="sync-badge" title="Saisie synchronisée">SYNC</span>}
+          {dimensions && <span className="terminal-dims">{dimensions.cols}×{dimensions.rows}</span>}
 
-            {!compact && (
-              <>
-                <button className="btn-toolbar" title="Ouvrir dans PowerShell"
-                  onClick={() => window.electronAPI.sshOpenInPowerShell(connection)}>
-                  ⊞ PowerShell
-                </button>
-                <button className="btn-toolbar" title="Ouvrir dans CMD"
-                  onClick={() => window.electronAPI.sshOpenInCmd(connection)}>
-                  ▣ CMD
-                </button>
-              </>
-            )}
-            <button className="btn-toolbar danger" onClick={() => { cleanup(); onClose(); }}>
-              ✕ Fermer
+          <span className="terminal-toolbar-spacer" />
+
+          <div className="terminal-theme-anchor">
+            <button
+              className={`btn-toolbar ${showThemePicker ? 'active' : ''}`}
+              title="Couleurs du terminal"
+              onClick={() => setShowThemePicker(p => !p)}
+            >
+              Thème : {(terminalTheme ?? DEFAULT_TERMINAL_THEME).label} <span className="btn-caret">▾</span>
             </button>
+            {showThemePicker && (
+              <ThemePicker
+                current={terminalTheme ?? DEFAULT_TERMINAL_THEME}
+                onSelect={handleThemeSelect}
+                onClose={() => setShowThemePicker(false)}
+              />
+            )}
           </div>
+
+          {!compact && (
+            <>
+              <button className="btn-toolbar" title="Ouvrir dans PowerShell"
+                onClick={() => window.electronAPI.sshOpenInPowerShell(connection)}>
+                PowerShell
+              </button>
+              <button className="btn-toolbar" title="Ouvrir dans CMD"
+                onClick={() => window.electronAPI.sshOpenInCmd(connection)}>
+                CMD
+              </button>
+            </>
+          )}
+          <button className="btn-round" title="Fermer l'onglet" onClick={() => { cleanup(); onClose(); }}>✕</button>
         </div>
 
         {/* ── Terminal ── */}
         <div ref={containerRef} className="terminal-container"
           style={{
-            flex: 1, minHeight: 0, padding: '4px',
+            flex: 1, minHeight: 0, padding: '10px 12px',
             background: terminalTheme?.background ?? DEFAULT_TERMINAL_THEME.background,
             visibility: errorOverlay ? 'hidden' : 'visible',
           }}

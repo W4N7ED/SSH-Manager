@@ -1,12 +1,20 @@
-const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, clipboard } = require('electron');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const crypto = require('crypto');
-const { Client } = require('ssh2');
+const os = require('os');
+const { Client, utils: sshUtils } = require('ssh2');
 const SftpClient = require('ssh2-sftp-client');
 const ftp = require('basic-ftp');
 const Store = require('electron-store');
 const { spawn } = require('child_process');
 const fs = require('fs');
+
+// Chromium traite un débordement horizontal comme un geste « page précédente ».
+// Dans une application à page unique, cela n'a aucun sens : sélectionner du
+// texte de droite à gauche jusqu'au bord d'une zone scrollable déclenchait un
+// retour en arrière. Doit être posé avant que l'application soit prête.
+app.commandLine.appendSwitch('disable-features', 'OverscrollHistoryNavigation');
 
 // ─── Encrypted storage ────────────────────────────────────────
 let metaStore = null;
@@ -131,7 +139,9 @@ function createWindow() {
     width: 1400, height: 900,
     minWidth: 900, minHeight: 600,
     frame: false,
-    backgroundColor: '#0d1117',
+    // Doit rester aligné sur --bg-base (renderer/src/index.css) : c'est la
+    // couleur peinte avant le premier rendu du renderer.
+    backgroundColor: '#151020',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -142,19 +152,27 @@ function createWindow() {
   });
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
+  const isDev = process.env.NODE_ENV === 'development';
+  const appUrl = isDev
+    ? 'http://localhost:5173'
+    : pathToFileURL(path.join(__dirname, 'dist', 'renderer', 'index.html')).toString();
+
   // ── Navigation hardening ──────────────────────────────────
-  // The app is single-page: block window.open and any navigation away from
-  // the app itself (defense-in-depth against XSS pivoting to external pages).
+  // The app is single-page: block window.open and any navigation away from the
+  // app itself (defense-in-depth against XSS pivoting to external pages).
+  //
+  // Le filtre porte sur l'URL exacte de l'application, pas sur le simple
+  // préfixe « file:// » : déposer un fichier ou une sélection de texte sur la
+  // fenêtre fait naviguer Chromium vers le contenu déposé, ce qui suffisait à
+  // faire disparaître l'interface.
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const isDevServer = url.startsWith('http://localhost:5173');
-    const isLocalFile = url.startsWith('file://');
-    if (!isDevServer && !isLocalFile) event.preventDefault();
+    if (url.startsWith(appUrl)) return;
+    event.preventDefault();
+    console.warn(`Navigation blocked — the app is single-page, requested: ${url}`);
   });
 
-  const isDev = process.env.NODE_ENV === 'development';
-  if (isDev) mainWindow.loadURL('http://localhost:5173');
-  else mainWindow.loadFile(path.join(__dirname, 'dist', 'renderer', 'index.html'));
+  mainWindow.loadURL(appUrl);
 }
 
 // ─── Pre-uninstall export mode ───────────────────────────────
@@ -242,6 +260,109 @@ app.on('window-all-closed', () => {
 });
 
 // ─── Window controls ─────────────────────────────────────────
+ipcMain.handle('app:getVersion', () => app.getVersion());
+
+// ─── Presse-papiers avec effacement différé ──────────────────
+// Le minuteur vit ici et non dans le renderer : `navigator.clipboard` exige une
+// fenêtre au premier plan, or l'effacement doit justement survenir pendant que
+// l'utilisateur est parti coller ailleurs. Le module clipboard d'Electron, lui,
+// n'a pas cette contrainte.
+let clipboardClearTimeout = null;
+/** Valeur en attente d'effacement, pour ne jamais écraser une copie ultérieure. */
+let clipboardPendingText = null;
+
+function cancelClipboardClear() {
+  if (clipboardClearTimeout !== null) {
+    clearTimeout(clipboardClearTimeout);
+    clipboardClearTimeout = null;
+  }
+  clipboardPendingText = null;
+}
+
+/** Efface le presse-papiers s'il contient encore la valeur copiée. */
+function clearClipboardIfUnchanged(text) {
+  if (clipboard.readText() !== text) return false;
+  clipboard.clear();
+  return true;
+}
+
+const PRIVATE_CLIPBOARD_SCRIPT = 'write-private-clipboard.ps1';
+const PRIVATE_CLIPBOARD_TIMEOUT_MS = 5000;
+
+function privateClipboardScriptPath() {
+  // Empaquetée, l'application vit dans app.asar : PowerShell ne peut pas y lire
+  // un fichier. Le script est donc livré en ressource externe.
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'scripts', PRIVATE_CLIPBOARD_SCRIPT)
+    : path.join(__dirname, 'scripts', PRIVATE_CLIPBOARD_SCRIPT);
+}
+
+/**
+ * Writes `text` to the clipboard flagged as private, so Windows clipboard
+ * history (Win+V) and cloud clipboard skip it. Resolves false when the native
+ * path is unavailable — the caller then falls back to a plain copy.
+ */
+function writePrivateClipboard(text) {
+  return new Promise(resolve => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-File', privateClipboardScriptPath(),
+    ], { windowsHide: true });
+
+    let stderr = '';
+    const timer = setTimeout(() => { child.kill(); resolve(false); }, PRIVATE_CLIPBOARD_TIMEOUT_MS);
+
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.on('error', err => {
+      clearTimeout(timer);
+      console.error('Private clipboard helper could not be started', err);
+      resolve(false);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        console.error(`Private clipboard helper exited with code ${code} — ${stderr.trim()}`);
+      }
+      resolve(code === 0);
+    });
+
+    // Le secret passe par l'entrée standard, jamais en argument : la ligne de
+    // commande d'un processus est lisible par les autres processus.
+    child.stdin.end(text);
+  });
+}
+
+ipcMain.handle('clipboard:copy', async (_, { text, autoClear, delaySeconds }) => {
+  cancelClipboardClear();
+
+  // Le marquage « privé » est propre à Windows ; ailleurs, copie ordinaire.
+  const privateMode = process.platform === 'win32'
+    ? await writePrivateClipboard(text)
+    : false;
+  if (!privateMode) clipboard.writeText(text);
+
+  if (!autoClear) return { autoClear: false, privateMode };
+
+  clipboardPendingText = text;
+  clipboardClearTimeout = setTimeout(() => {
+    clipboardClearTimeout = null;
+    clipboardPendingText = null;
+    const cleared = clearClipboardIfUnchanged(text);
+    console.log(cleared
+      ? `Clipboard cleared after ${delaySeconds}s`
+      : `Clipboard left untouched after ${delaySeconds}s — content changed since the copy`);
+  }, delaySeconds * 1000);
+
+  return { autoClear: true, delaySeconds, privateMode };
+});
+
+// Quitter avant l'échéance laisserait le secret dans le presse-papiers.
+app.on('will-quit', () => {
+  if (clipboardPendingText === null) return;
+  clearClipboardIfUnchanged(clipboardPendingText);
+  cancelClipboardClear();
+});
+
 ipcMain.handle('window:minimize', () => mainWindow.minimize());
 ipcMain.handle('window:maximize', () => mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize());
 ipcMain.handle('window:close', () => mainWindow.close());
@@ -430,7 +551,7 @@ ipcMain.handle('connections:importDecrypt', (_, { mnemonic, payload }) => {
 });
 
 // ─── SSH ─────────────────────────────────────────────────────
-ipcMain.handle('ssh:connect', (_, { tabId, connection }) => {
+ipcMain.handle('ssh:connect', (_, { tabId, connection, cols, rows }) => {
   return new Promise((resolve, reject) => {
     const client = new Client();
     const port = connection.port || 22;
@@ -448,16 +569,25 @@ ipcMain.handle('ssh:connect', (_, { tabId, connection }) => {
     }
 
     client.on('ready', () => {
-      client.shell({ term: 'xterm-256color', cols: 120, rows: 40 }, (err, stream) => {
+      // Open the remote PTY at the real size of the local xterm instance: a
+      // mismatch makes the server draw the prompt at wrong coordinates,
+      // overlapping previously displayed text.
+      const initialCols = Number.isInteger(cols) && cols > 0 ? cols : 120;
+      const initialRows = Number.isInteger(rows) && rows > 0 ? rows : 40;
+      client.shell({ term: 'xterm-256color', cols: initialCols, rows: initialRows }, (err, stream) => {
         if (err) { client.end(); return reject(err.message); }
         sshSessions.set(tabId, { client, stream });
+        // Forward raw bytes (Buffer → Uint8Array over IPC): xterm.js decodes them
+        // as UTF-8 with a streaming decoder, so multi-byte characters split across
+        // two network chunks render correctly. Decoding to a string here with a
+        // single-byte encoding would garble accents and box-drawing characters.
         stream.on('data', data => {
           if (mainWindow && !mainWindow.isDestroyed())
-            mainWindow.webContents.send('ssh:data:' + tabId, data.toString('binary'));
+            mainWindow.webContents.send('ssh:data:' + tabId, data);
         });
         stream.stderr.on('data', data => {
           if (mainWindow && !mainWindow.isDestroyed())
-            mainWindow.webContents.send('ssh:data:' + tabId, data.toString('binary'));
+            mainWindow.webContents.send('ssh:data:' + tabId, data);
         });
         stream.on('close', () => {
           sshSessions.delete(tabId);
@@ -483,6 +613,60 @@ ipcMain.handle('ssh:forgetHostKey', (_, { host, port }) => {
     meta.set('hostKeys', knownHosts);
   }
   return { success: true };
+});
+
+// ─── Génération de clés SSH ──────────────────────────────────
+// Le nom devient un nom de fichier dans ~/.ssh : il ne doit contenir ni
+// séparateur de chemin ni séquence de remontée d'arborescence.
+const KEY_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+const KEY_TYPES = {
+  ed25519: { algorithm: 'ed25519', options: {} },
+  rsa:     { algorithm: 'rsa',     options: { bits: 4096 } },
+};
+
+/**
+ * Generates an SSH key pair in the user's ~/.ssh directory.
+ * Never overwrites an existing key: losing a private key is unrecoverable.
+ */
+ipcMain.handle('ssh:generateKey', (_, { name, type }) => {
+  if (!KEY_NAME_PATTERN.test(name ?? '')) {
+    return { success: false, error: 'Nom de fichier invalide : lettres, chiffres, point, tiret et souligné uniquement.' };
+  }
+  const keyType = KEY_TYPES[type];
+  if (!keyType) return { success: false, error: `Type de clé inconnu : ${type}` };
+
+  const sshDir = path.join(os.homedir(), '.ssh');
+  const privateKeyPath = path.join(sshDir, name);
+  const publicKeyPath = privateKeyPath + '.pub';
+
+  try {
+    fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
+
+    if (fs.existsSync(privateKeyPath) || fs.existsSync(publicKeyPath)) {
+      return { success: false, error: `Un fichier « ${name} » existe déjà dans ${sshDir}.` };
+    }
+
+    const comment = `${os.userInfo().username}@${os.hostname()}`;
+    const pair = sshUtils.generateKeyPairSync(keyType.algorithm, { ...keyType.options, comment });
+
+    // flag 'wx' : échoue si le fichier est apparu entre-temps, plutôt que d'écraser.
+    fs.writeFileSync(privateKeyPath, pair.private, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(publicKeyPath, pair.public + '\n', { mode: 0o644, flag: 'wx' });
+
+    console.log(`SSH key pair generated — type: ${type}, path: ${privateKeyPath}`);
+    return { success: true, privateKeyPath, publicKey: pair.public };
+  } catch (err) {
+    console.error(`Failed to generate SSH key pair — type: ${type}, path: ${privateKeyPath}`, err);
+    return { success: false, error: err.message };
+  }
+});
+
+// Reads back the pinned host key fingerprint, so the connection inspector can
+// show which key is trusted for a host. Returns null when nothing is pinned yet.
+ipcMain.handle('ssh:getHostKeyFingerprint', (_, { host, port }) => {
+  const knownHosts = getMetaStore().get('hostKeys', {});
+  return knownHosts[`${host}:${port || 22}`] ?? null;
 });
 
 ipcMain.handle('ssh:write', (_, { tabId, data }) => { const s = sshSessions.get(tabId); if (s) s.stream.write(data); });

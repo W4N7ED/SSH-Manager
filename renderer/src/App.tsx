@@ -1,14 +1,17 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Connection, Tab, Quadrant } from './types';
-import Sidebar from './components/Sidebar';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { Connection, ConnectionType, GroupFilter, Tab, Quadrant } from './types';
+import GroupRail from './components/GroupRail';
 import TerminalTab, { TerminalTabHandle } from './components/TerminalTab';
 import FileBrowser from './components/FileBrowser';
 import ConnectionForm from './components/ConnectionForm';
+import ConnectionList from './components/ConnectionList';
 import PasswordPrompt from './components/PasswordPrompt';
 import TiledLayout from './components/TiledLayout';
 import SetupWizard from './components/SetupWizard';
-import ConnectionGrid from './components/ConnectionGrid';
-import UnifiedBar, { loadTileSize, TileSize } from './components/UnifiedBar';
+import CommandPalette from './components/CommandPalette';
+import StatusBar from './components/StatusBar';
+import Toolbox from './components/Toolbox';
+import UnifiedBar from './components/UnifiedBar';
 import {
   TerminalThemeConfig, loadTerminalTheme, TERMINAL_THEME_KEY,
 } from './terminal-themes';
@@ -16,6 +19,8 @@ import {
 declare global {
   interface Window {
     electronAPI: {
+      appGetVersion: () => Promise<string>;
+      clipboardCopy: (p: { text: string; autoClear: boolean; delaySeconds: number }) => Promise<{ autoClear: boolean; delaySeconds?: number; privateMode: boolean }>;
       windowMinimize: () => void;
       windowMaximize: () => void;
       windowClose: () => void;
@@ -29,14 +34,16 @@ declare global {
       connectionsExport: (d: { connections: Connection[]; groups: string[] }) => Promise<{ success: boolean; canceled?: boolean; path?: string; error?: string }>;
       connectionsImport: () => Promise<{ success: boolean; canceled?: boolean; requiresMnemonic?: boolean; payload?: unknown; connections?: Connection[]; groups?: string[]; error?: string }>;
       connectionsImportDecrypt: (p: { mnemonic: string; payload: unknown }) => Promise<{ success: boolean; connections?: Connection[]; groups?: string[]; error?: string }>;
-      sshConnect: (p: { tabId: string; connection: Connection }) => Promise<{ success: boolean }>;
+      sshConnect: (p: { tabId: string; connection: Connection; cols: number; rows: number }) => Promise<{ success: boolean }>;
       sshWrite: (p: { tabId: string; data: string }) => void;
       sshResize: (p: { tabId: string; cols: number; rows: number }) => void;
       sshDisconnect: (tabId: string) => void;
       sshOpenInPowerShell: (c: Connection) => void;
       sshOpenInCmd: (c: Connection) => void;
       sshForgetHostKey: (p: { host: string; port: number }) => Promise<{ success: boolean }>;
-      onSshData: (tabId: string, cb: (data: string) => void) => () => void;
+      sshGetHostKeyFingerprint: (p: { host: string; port: number }) => Promise<string | null>;
+      sshGenerateKey: (p: { name: string; type: 'ed25519' | 'rsa' }) => Promise<{ success: boolean; privateKeyPath?: string; publicKey?: string; error?: string }>;
+      onSshData: (tabId: string, cb: (data: string | Uint8Array) => void) => () => void;
       onSshClose: (tabId: string, cb: () => void) => () => void;
       sftpConnect: (p: { tabId: string; connection: Connection }) => Promise<{ success: boolean; error?: string }>;
       sftpList: (p: { tabId: string; remotePath: string }) => Promise<{ success: boolean; list?: FileEntry[]; error?: string }>;
@@ -55,13 +62,23 @@ declare global {
       pickKeyFile: () => Promise<string | null>;
     };
   }
-  interface FileEntry { name: string; type: string; size: number; modifyTime?: number; }
+  interface FileEntry {
+    name: string;
+    type: string;
+    size: number;
+    modifyTime?: number;
+    /** SFTP: permissions already formatted as rwx triplets. */
+    rights?: { user: string; group: string; other: string };
+    /** FTP: permissions as octal-style bitfields. */
+    permissions?: { user: number; group: number; world: number };
+  }
 }
 
-const GROUPS_KEY        = 'sshmanager-groups';
-const GROUP_COLORS_KEY  = 'sshmanager-group-colors';
-const RECENTS_KEY       = 'sshmanager-recents';
-const MAX_RECENTS       = 15;
+const GROUPS_KEY         = 'sshmanager-groups';
+const GROUP_COLORS_KEY   = 'sshmanager-group-colors';
+const RAIL_COLLAPSED_KEY = 'sshmanager-rail-collapsed';
+
+const QUADRANTS: Quadrant[] = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
 
 let tabCounter = 0;
 // Includes a timestamp so a session id can never collide with one left over in
@@ -77,17 +94,12 @@ const isSessionId = (id: string) => id.startsWith('tab-');
 const persistConnections = (list: Connection[]) =>
   window.electronAPI.connectionsSave(list.filter(c => !isSessionId(c.id)));
 
-const loadGroups      = (): string[]                => { try { return JSON.parse(localStorage.getItem(GROUPS_KEY)       ?? '[]');  } catch { return []; } };
-const loadGroupColors = (): Record<string, string>  => { try { return JSON.parse(localStorage.getItem(GROUP_COLORS_KEY) ?? '{}');  } catch { return {}; } };
-const loadRecents     = (): string[]                => { try { return JSON.parse(localStorage.getItem(RECENTS_KEY)      ?? '[]');  } catch { return []; } };
+const loadGroups       = (): string[]               => { try { return JSON.parse(localStorage.getItem(GROUPS_KEY)       ?? '[]'); } catch { return []; } };
+const loadGroupColors  = (): Record<string, string> => { try { return JSON.parse(localStorage.getItem(GROUP_COLORS_KEY) ?? '{}'); } catch { return {}; } };
+const loadRailCollapsed = (): boolean               => localStorage.getItem(RAIL_COLLAPSED_KEY) === 'true';
 
-const saveGroupsLS      = (g: string[])                  => localStorage.setItem(GROUPS_KEY,       JSON.stringify(g));
-const saveGroupColorsLS = (c: Record<string, string>)    => localStorage.setItem(GROUP_COLORS_KEY, JSON.stringify(c));
-const pushRecent    = (id: string) => {
-  const prev    = loadRecents().filter(r => r !== id);
-  const updated = [id, ...prev].slice(0, MAX_RECENTS);
-  localStorage.setItem(RECENTS_KEY, JSON.stringify(updated));
-};
+const saveGroupsLS      = (g: string[])               => localStorage.setItem(GROUPS_KEY,       JSON.stringify(g));
+const saveGroupColorsLS = (c: Record<string, string>) => localStorage.setItem(GROUP_COLORS_KEY, JSON.stringify(c));
 
 function needsPasswordPrompt(conn: Connection): boolean {
   if (conn.privateKeyPath) return false;
@@ -106,7 +118,6 @@ export default function App() {
   const [connections, setConnections]   = useState<Connection[]>([]);
   const [groups, setGroups]             = useState<string[]>(loadGroups);
   const [groupColors, setGroupColors]   = useState<Record<string, string>>(loadGroupColors);
-  const [recentIds, setRecentIds]       = useState<string[]>(loadRecents);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -115,11 +126,16 @@ export default function App() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [pwPrompt, setPwPrompt] = useState<{ conn: Connection; isEphemeral: boolean } | null>(null);
   const [isPortable, setIsPortable] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
 
-  // ── Unified bar state ─────────────────────────────────────
-  const [gridFilter, setGridFilter] = useState<'all' | 'ssh' | 'sftp' | 'ftp'>('all');
-  const [gridSearch, setGridSearch] = useState('');
-  const [tileSize, setTileSize]           = useState<TileSize>(loadTileSize);
+  // ── Dashboard filters ─────────────────────────────────────
+  const [typeFilter, setTypeFilter]     = useState<'all' | ConnectionType>('all');
+  const [search, setSearch]             = useState('');
+  const [groupFilter, setGroupFilter]   = useState<GroupFilter>({ kind: 'all' });
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(loadRailCollapsed);
+  /** Ce que montre l'espace permanent, quand aucune session n'est au premier plan. */
+  const [dashboardView, setDashboardView] = useState<'connections' | 'toolbox'>('connections');
+  const [paletteOpen, setPaletteOpen]   = useState(false);
   const [terminalTheme, setTerminalTheme] = useState<TerminalThemeConfig>(loadTerminalTheme);
 
   const handleThemeChange = useCallback((theme: TerminalThemeConfig) => {
@@ -161,6 +177,7 @@ export default function App() {
       setSetupReady(initialized);
       if (initialized) loadConnections();
     });
+    window.electronAPI.appGetVersion().then(setAppVersion);
     const closeMenu = () => setContextMenu(null);
     document.addEventListener('click', closeMenu);
     return () => document.removeEventListener('click', closeMenu);
@@ -218,15 +235,8 @@ export default function App() {
       saveGroupColorsLS(next);
       return next;
     });
-    // Migrate the collapsed state to the new name
-    try {
-      const collapsed = JSON.parse(localStorage.getItem('sshmanager-group-collapsed') ?? '{}');
-      if (Object.prototype.hasOwnProperty.call(collapsed, oldName)) {
-        collapsed[newName] = collapsed[oldName];
-        delete collapsed[oldName];
-        localStorage.setItem('sshmanager-group-collapsed', JSON.stringify(collapsed));
-      }
-    } catch {}
+    setGroupFilter(prev =>
+      prev.kind === 'group' && prev.name === oldName ? { kind: 'group', name: newName } : prev);
     setConnections(prev => {
       const next = prev.map(c => c.group === oldName ? { ...c, group: newName } : c);
       persistConnections(next);
@@ -236,7 +246,9 @@ export default function App() {
 
   const handleSetGroupColor = useCallback((groupName: string, color: string) => {
     setGroupColors(prev => {
-      const next = { ...prev, [groupName]: color };
+      const next = { ...prev };
+      if (color) next[groupName] = color;
+      else delete next[groupName];
       saveGroupColorsLS(next);
       return next;
     });
@@ -245,12 +257,6 @@ export default function App() {
   const handleDeleteGroup = useCallback((name: string) => {
     setGroups(prev => { const next = prev.filter(g => g !== name); saveGroupsLS(next); return next; });
     setGroupColors(prev => { const next = { ...prev }; delete next[name]; saveGroupColorsLS(next); return next; });
-    // Clean up the collapsed state for this group
-    try {
-      const collapsed = JSON.parse(localStorage.getItem('sshmanager-group-collapsed') ?? '{}');
-      delete collapsed[name];
-      localStorage.setItem('sshmanager-group-collapsed', JSON.stringify(collapsed));
-    } catch {}
     setConnections(prev => {
       const next = prev.map(c => c.group === name ? { ...c, group: undefined } : c);
       persistConnections(next);
@@ -296,6 +302,14 @@ export default function App() {
   const handleToggleFavorite = useCallback((id: string) => {
     setConnections(prev => {
       const next = prev.map(c => c.id === id ? { ...c, favorite: !c.favorite } : c);
+      persistConnections(next);
+      return next;
+    });
+  }, []);
+
+  const handleSetConnectionColor = useCallback((id: string, color: string) => {
+    setConnections(prev => {
+      const next = prev.map(c => c.id === id ? { ...c, color: color || undefined } : c);
       persistConnections(next);
       return next;
     });
@@ -359,8 +373,19 @@ export default function App() {
     const tabId = newTabId();
     const isFile = conn.type === 'ftp' || conn.type === 'sftp';
     const sessionConn: Connection = { ...conn, id: tabId };
+    const openedAt = Date.now();
     tabOrigins.current.set(tabId, conn);
-    setConnections(prev => [...prev, sessionConn]);
+
+    setConnections(prev => {
+      // Stamp the saved entry so the list can sort and display "last access".
+      const stamped = !isEphemeral && !isSessionId(conn.id)
+        ? prev.map(c => c.id === conn.id ? { ...c, lastUsedAt: openedAt } : c)
+        : prev;
+      const next = [...stamped, sessionConn];
+      if (stamped !== prev) persistConnections(next);
+      return next;
+    });
+
     setTabs(prev => [...prev, {
       id: tabId, connectionId: tabId,
       connectionName: conn.name || conn.host,
@@ -368,17 +393,17 @@ export default function App() {
       connectionType: conn.type, status: 'connecting',
     }]);
     setActiveTabId(tabId);
-    // Enregistrer dans les récentes (connexions sauvegardées uniquement)
-    if (!isEphemeral && conn.id && !conn.id.startsWith('tab-')) {
-      pushRecent(conn.id);
-      setRecentIds(loadRecents());
-    }
   }, []);
 
   const handleConnect = useCallback((conn: Connection) => {
     if (needsPasswordPrompt(conn)) setPwPrompt({ conn, isEphemeral: false });
     else openTab(conn);
   }, [openTab]);
+
+  /** Opens a saved connection over another protocol (SSH terminal ⇄ SFTP files). */
+  const handleOpenAs = useCallback((conn: Connection, type: ConnectionType) => {
+    handleConnect({ ...conn, type });
+  }, [handleConnect]);
 
   const handleQuickConnect = useCallback((conn: Connection) => {
     if (needsPasswordPrompt(conn)) setPwPrompt({ conn, isEphemeral: true });
@@ -389,7 +414,7 @@ export default function App() {
     if (!pwPrompt) return;
     const { conn, isEphemeral } = pwPrompt;
     const connWithPw: Connection = { ...conn, password };
-    if (save && !isEphemeral && conn.id && !conn.id.startsWith('tab-')) {
+    if (save && !isEphemeral && conn.id && !isSessionId(conn.id)) {
       setConnections(prev => {
         const exists = prev.find(c => c.id === conn.id);
         if (!exists) return prev;
@@ -408,14 +433,13 @@ export default function App() {
     handleCloseTab(tabId);
     if (origin) {
       const connWithoutPw = { ...origin, password: undefined };
-      setPwPrompt({ conn: connWithoutPw, isEphemeral: !origin.id || origin.id.startsWith('tab-') });
+      setPwPrompt({ conn: connWithoutPw, isEphemeral: !origin.id || isSessionId(origin.id) });
     }
   }, []);
 
   const handleSaveQuickConn = useCallback((conn: Connection) => {
     handleSaveConnection({ ...conn, id: newConnId() });
   }, [handleSaveConnection]);
-
 
   // ── Tab status / close ────────────────────────────────────
   const handleTabStatusChange = useCallback((tabId: string, status: Tab['status'], error?: string) => {
@@ -455,6 +479,17 @@ export default function App() {
     setTiledTabs(prev => { const next = { ...prev }; delete next[quadrant]; return next; });
   }, []);
 
+  /** Ctrl+M — spreads the first open sessions over the quadrants, or restores tabs. */
+  const handleToggleTiled = useCallback(() => {
+    setTiledTabs(prev => {
+      if (Object.keys(prev).length > 0) return {};
+      const next: Partial<Record<Quadrant, string>> = {};
+      tabs.slice(0, QUADRANTS.length).forEach((tab, index) => { next[QUADRANTS[index]] = tab.id; });
+      return next;
+    });
+    if (tabs.length > 0 && activeTabId === null) setActiveTabId(tabs[0].id);
+  }, [tabs, activeTabId]);
+
   // ── Sync ──────────────────────────────────────────────────
   const handleToggleSync = useCallback((tabId: string) => {
     setSyncedTabIds(prev => { const next = new Set(prev); if (next.has(tabId)) next.delete(tabId); else next.add(tabId); return next; });
@@ -485,11 +520,69 @@ export default function App() {
 
   const handleTabDragEnd = useCallback(() => setDraggingTabId(null), []);
 
-  const openNewForm = (defaultGroup?: string) => { setEditingConn(null); setFormDefaultGroup(defaultGroup); setFormOpen(true); };
-  const openEditForm = (conn: Connection) => { setEditingConn(conn); setFormDefaultGroup(undefined); setFormOpen(true); };
+  const openNewForm = useCallback((defaultGroup?: string) => {
+    setEditingConn(null);
+    setFormDefaultGroup(defaultGroup);
+    setFormOpen(true);
+  }, []);
+  const openEditForm = useCallback((conn: Connection) => {
+    setEditingConn(conn);
+    setFormDefaultGroup(undefined);
+    setFormOpen(true);
+  }, []);
 
-  const savedConnections = connections.filter(c => !c.id.startsWith('tab-'));
+  const toggleRail = useCallback(() => {
+    setRailCollapsed(prev => {
+      localStorage.setItem(RAIL_COLLAPSED_KEY, String(!prev));
+      return !prev;
+    });
+  }, []);
+
+  const savedConnections = useMemo(
+    () => connections.filter(c => !isSessionId(c.id)),
+    [connections],
+  );
   const tiledTabIds = new Set(Object.values(tiledTabs));
+  const activeTab = tabs.find(t => t.id === activeTabId) ?? null;
+  const activeSessionConn = activeTab ? connections.find(c => c.id === activeTab.connectionId) : undefined;
+  const activeTerminalTabId = activeTab?.type === 'terminal' ? activeTab.id : null;
+
+  /** The saved connections shown in the list, narrowed by rail, type and search. */
+  const visibleConnections = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return savedConnections.filter(conn => {
+      if (typeFilter !== 'all' && conn.type !== typeFilter) return false;
+
+      if (groupFilter.kind === 'favorites' && !conn.favorite) return false;
+      if (groupFilter.kind === 'group' && conn.group !== groupFilter.name) return false;
+      if (groupFilter.kind === 'ungrouped' && conn.group && groups.includes(conn.group)) return false;
+
+      if (query) {
+        const haystack = `${conn.name} ${conn.host} ${conn.username}`.toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
+      return true;
+    });
+  }, [savedConnections, typeFilter, groupFilter, groups, search]);
+
+  // ── Global shortcuts ─────────────────────────────────────
+  // Captured on the window so xterm.js never sees these combinations first.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+
+      if (key === 'k')                    { e.preventDefault(); e.stopPropagation(); setPaletteOpen(open => !open); }
+      else if (key === 'n' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); openNewForm(); }
+      else if (key === 'm' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); handleToggleTiled(); }
+      else if (key === 's' && e.shiftKey && activeTerminalTabId) {
+        e.preventDefault(); e.stopPropagation();
+        handleToggleSync(activeTerminalTabId);
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [openNewForm, handleToggleTiled, handleToggleSync, activeTerminalTabId]);
 
   // ── Loading ───────────────────────────────────────────────
   if (setupReady === null) {
@@ -502,18 +595,24 @@ export default function App() {
     );
   }
 
+  const titlebar = (
+    <div className="titlebar" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+      <div className="titlebar-title">
+        <span className="titlebar-icon">⬡</span> SSH Manager
+      </div>
+      <div className="titlebar-controls" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        <button className="titlebar-btn" onClick={() => window.electronAPI.windowMinimize()}>─</button>
+        <button className="titlebar-btn" onClick={() => window.electronAPI.windowMaximize()}>□</button>
+        <button className="titlebar-btn close" onClick={() => window.electronAPI.windowClose()}>✕</button>
+      </div>
+    </div>
+  );
+
   // ── First launch: setup wizard ────────────────────────────
   if (!setupReady) {
     return (
       <div className="app">
-        <div className="titlebar" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-          <div className="titlebar-title"><span className="titlebar-icon">⬡</span> SSH Manager</div>
-          <div className="titlebar-controls" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-            <button className="titlebar-btn" onClick={() => window.electronAPI.windowMinimize()}>─</button>
-            <button className="titlebar-btn" onClick={() => window.electronAPI.windowMaximize()}>□</button>
-            <button className="titlebar-btn close" onClick={() => window.electronAPI.windowClose()}>✕</button>
-          </div>
-        </div>
+        {titlebar}
         <SetupWizard onComplete={handleSetupComplete} portable={isPortable} />
       </div>
     );
@@ -521,68 +620,86 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* Titlebar */}
-      <div className="titlebar" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <div className="titlebar-title">
-          <span className="titlebar-icon">⬡</span> SSH Manager
-        </div>
-        <div className="titlebar-controls" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          <button className="titlebar-btn" onClick={() => window.electronAPI.windowMinimize()}>─</button>
-          <button className="titlebar-btn" onClick={() => window.electronAPI.windowMaximize()}>□</button>
-          <button className="titlebar-btn close" onClick={() => window.electronAPI.windowClose()}>✕</button>
-        </div>
-      </div>
+      {titlebar}
 
       <div className="main-layout">
-        <Sidebar
-          connections={savedConnections} recentIds={recentIds} groups={groups}
-          activeConnectionId={activeTabId ? (tabs.find(t => t.id === activeTabId)?.connectionId ?? null) : null}
-          onConnect={handleConnect} onNew={openNewForm} onEdit={openEditForm}
-          onDelete={handleDeleteConnection} onToggleFavorite={handleToggleFavorite}
-          onRenameGroup={handleRenameGroup} onDeleteGroup={handleDeleteGroup}
-          onCreateGroup={handleCreateGroup} onExport={handleExport} onImport={handleImport}
+        <UnifiedBar
+          groups={groups}
+          currentFilter={typeFilter}
+          onFilterChange={setTypeFilter}
+          search={search}
+          onSearchChange={setSearch}
+          onConnect={handleQuickConnect}
+          onSaveConnection={handleSaveQuickConn}
+          onNewConnection={() => openNewForm()}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onToggleRail={toggleRail}
+          railCollapsed={railCollapsed}
         />
 
-        <div className="content-area">
-          <UnifiedBar
-            groups={groups}
-            currentFilter={gridFilter}
-            onFilterChange={f => { setGridFilter(f); setGridSearch(''); }}
-            onConnect={handleQuickConnect}
-            onSaveConnection={handleSaveQuickConn}
-            tileSize={tileSize}
-            onTileSizeChange={setTileSize}
-          />
+        <div className="tab-bar">
+          {/* Permanent tabs: always visible, even with no open sessions. */}
+          <div
+            className={`tab tab-home ${activeTabId === null && dashboardView === 'connections' ? 'active' : ''}`}
+            onClick={() => { setActiveTabId(null); setDashboardView('connections'); }}
+            title="Tableau de bord"
+          >
+            <span className="tab-icon">⌂</span>
+            <span className="tab-name">Accueil</span>
+          </div>
+          <div
+            className={`tab tab-home ${activeTabId === null && dashboardView === 'toolbox' ? 'active' : ''}`}
+            onClick={() => { setActiveTabId(null); setDashboardView('toolbox'); }}
+            title="Boîte à outils"
+          >
+            <span className="tab-icon">⚒</span>
+            <span className="tab-name">Boîte à outils</span>
+          </div>
+          {tabs.map(tab => {
+            const inTile = tiledTabIds.has(tab.id);
+            const isSynced = syncedTabIds.has(tab.id);
+            return (
+              <div key={tab.id}
+                className={`tab ${tab.id === activeTabId ? 'active' : ''} ${inTile ? 'tab-tiled' : ''} ${isSynced ? 'tab-synced' : ''}`}
+                draggable onDragStart={e => handleTabDragStart(e, tab.id)} onDragEnd={handleTabDragEnd}
+                onClick={() => setActiveTabId(tab.id)}
+                onContextMenu={e => handleTabContextMenu(e, tab.id)}
+              >
+                <span className={`tab-status status-${tab.status}`} />
+                <span className="tab-name">{tab.connectionName}</span>
+                {tab.connectionType !== 'ssh' && <span className="tab-proto">{tab.connectionType.toUpperCase()}</span>}
+                {isSynced && <span className="tab-sync-dot" title="Saisie synchronisée">⟳</span>}
+                {inTile && <span className="tab-tile-dot" title="Mode mosaïque">⊡</span>}
+                <button className="tab-close" onClick={e => { e.stopPropagation(); handleCloseTab(tab.id); }}>✕</button>
+              </div>
+            );
+          })}
+          {draggingTabId && <div className="tab-bar-drag-hint">⊕ Déposez dans un coin de l'écran</div>}
+        </div>
 
-          {tabs.length > 0 && (
-            <div className="tab-bar">
-              {tabs.map(tab => {
-                const inTile = tiledTabIds.has(tab.id);
-                const isSynced = syncedTabIds.has(tab.id);
-                return (
-                  <div key={tab.id}
-                    className={`tab ${tab.id === activeTabId ? 'active' : ''} ${inTile ? 'tab-tiled' : ''} ${isSynced ? 'tab-synced' : ''}`}
-                    draggable onDragStart={e => handleTabDragStart(e, tab.id)} onDragEnd={handleTabDragEnd}
-                    onClick={() => { if (!inTile) setActiveTabId(tab.id); }}
-                    onContextMenu={e => handleTabContextMenu(e, tab.id)}
-                  >
-                    <span className="tab-icon">{tab.connectionType === 'ssh' ? '>' : tab.connectionType === 'sftp' ? '⇅' : '≈'}</span>
-                    <span className="tab-name">{tab.connectionName}</span>
-                    {isSynced && <span className="tab-sync-dot" title="Saisie synchronisée">⟳</span>}
-                    {inTile && <span className="tab-tile-dot" title="Mode tuilé">⊡</span>}
-                    <span className={`tab-status status-${tab.status}`} />
-                    <button className="tab-close" onClick={e => { e.stopPropagation(); handleCloseTab(tab.id); }}>✕</button>
-                  </div>
-                );
-              })}
-              {draggingTabId && <div className="tab-bar-drag-hint">⊕ Déposez dans un coin de l'écran</div>}
-            </div>
+        <div className="workspace">
+          {/* Le rail ne trie que des connexions : il ne suit ni les sessions
+              ouvertes ni la boîte à outils. */}
+          {!railCollapsed && activeTabId === null && dashboardView === 'connections' && (
+            <GroupRail
+              connections={savedConnections}
+              groups={groups}
+              groupColors={groupColors}
+              selection={groupFilter}
+              onSelect={setGroupFilter}
+              onCreateGroup={handleCreateGroup}
+              onRenameGroup={handleRenameGroup}
+              onDeleteGroup={handleDeleteGroup}
+              onSetGroupColor={handleSetGroupColor}
+              onImport={handleImport}
+              onExport={handleExport}
+            />
           )}
 
           <div className="tab-content">
             {draggingTabId && (
               <div className="drop-zones-overlay">
-                {(['topLeft', 'topRight', 'bottomLeft', 'bottomRight'] as Quadrant[]).map(quadrant => (
+                {QUADRANTS.map(quadrant => (
                   <div key={quadrant} className={`drop-zone drop-zone-${quadrant}`}
                     onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
                     onDrop={e => { e.preventDefault(); const id = e.dataTransfer.getData('tabId'); if (id) handleDropToQuadrant(id, quadrant); }}>
@@ -595,31 +712,39 @@ export default function App() {
               </div>
             )}
 
-            {tabs.length === 0 && (
-              <ConnectionGrid
-                connections={savedConnections}
-                groups={groups}
+            {activeTabId === null && dashboardView === 'toolbox' && <Toolbox />}
+
+            {activeTabId === null && dashboardView === 'connections' && (
+              <ConnectionList
+                connections={visibleConnections}
                 groupColors={groupColors}
-                filter={gridFilter}
-                search={gridSearch}
-                tileSize={tileSize}
+                search={search}
                 onConnect={handleConnect}
-                onNew={openNewForm}
+                onOpenAs={handleOpenAs}
+                onNew={() => openNewForm(groupFilter.kind === 'group' ? groupFilter.name : undefined)}
                 onEdit={openEditForm}
-                onCreateGroup={handleCreateGroup}
-                onSetGroupColor={handleSetGroupColor}
+                onDelete={handleDeleteConnection}
+                onToggleFavorite={handleToggleFavorite}
+                onSetConnectionColor={handleSetConnectionColor}
               />
             )}
 
             {isTiledMode && (
-              <TiledLayout
-                tiledTabs={tiledTabs} tabs={tabs} connections={connections}
-                syncedTabIds={syncedTabIds} tabRefs={tabRefsMap.current}
-                draggingTabId={draggingTabId} onStatusChange={handleTabStatusChange}
-                onCloseTab={handleCloseTab} onDropToQuadrant={handleDropToQuadrant}
-                onRemoveFromTile={handleRemoveFromTile} onSyncInput={handleSyncInput}
-                terminalTheme={terminalTheme} onThemeChange={handleThemeChange}
-              />
+              // Kept mounted but hidden while the dashboard is displayed, so the
+              // tiled terminal sessions stay alive.
+              <div
+                className="tiled-layout-host"
+                style={{ display: activeTabId === null ? 'none' : 'flex', flex: 1, minHeight: 0 }}
+              >
+                <TiledLayout
+                  tiledTabs={tiledTabs} tabs={tabs} connections={connections}
+                  syncedTabIds={syncedTabIds} tabRefs={tabRefsMap.current}
+                  draggingTabId={draggingTabId} onStatusChange={handleTabStatusChange}
+                  onCloseTab={handleCloseTab} onDropToQuadrant={handleDropToQuadrant}
+                  onRemoveFromTile={handleRemoveFromTile} onSyncInput={handleSyncInput}
+                  terminalTheme={terminalTheme} onThemeChange={handleThemeChange}
+                />
+              </div>
             )}
 
             {tabs.map(tab => {
@@ -633,6 +758,7 @@ export default function App() {
                   {tab.type === 'terminal' ? (
                     <TerminalTab ref={tabRef} tab={tab} connection={conn}
                       terminalTheme={terminalTheme}
+                      isActive={tab.id === activeTabId}
                       onStatusChange={handleTabStatusChange} onClose={() => handleCloseTab(tab.id)}
                       onRetry={() => handleRetry(tab.id)}
                       onSyncInput={isSynced ? (data) => handleSyncInput(tab.id, data) : undefined}
@@ -649,6 +775,33 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      <StatusBar
+        tabs={tabs}
+        activeTab={activeTab}
+        activeTarget={activeSessionConn
+          ? `${activeSessionConn.username}@${activeSessionConn.host}:${activeSessionConn.port || (activeSessionConn.type === 'ftp' ? 21 : 22)}`
+          : null}
+        syncedCount={syncedTabIds.size}
+        vaultEncrypted={!isPortable}
+        version={appVersion}
+      />
+
+      {paletteOpen && (
+        <CommandPalette
+          connections={savedConnections}
+          canSyncInput={activeTerminalTabId !== null}
+          tiled={isTiledMode}
+          onConnect={handleConnect}
+          onOpenAs={handleOpenAs}
+          onNewConnection={() => openNewForm()}
+          onOpenToolbox={() => { setActiveTabId(null); setDashboardView('toolbox'); }}
+          onToggleTiled={handleToggleTiled}
+          onToggleSync={() => { if (activeTerminalTabId) handleToggleSync(activeTerminalTabId); }}
+          onThemeChange={handleThemeChange}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
       {toast && <div className={`toast ${toast.ok ? 'toast-ok' : 'toast-err'}`}>{toast.msg}</div>}
 
@@ -671,7 +824,7 @@ export default function App() {
                     const q = (Object.keys(tiledTabs) as Quadrant[]).find(k => tiledTabs[k] === contextMenu.tabId);
                     if (q) handleRemoveFromTile(q);
                     setContextMenu(null);
-                  }}><span>⊡</span> Retirer du mode tuilé</button>
+                  }}><span>⊡</span> Retirer de la mosaïque</button>
                 )}
                 <hr className="ctx-menu-sep" />
                 <button className="ctx-menu-item ctx-danger" onClick={() => { handleCloseTab(contextMenu.tabId); setContextMenu(null); }}>
@@ -688,17 +841,17 @@ export default function App() {
         <div className="modal-overlay" onClick={() => { setMnemonicImport(null); setMnemonicInput(''); setMnemonicError(''); }}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>🔐 Fichier chiffré — phrase requise</h2>
+              <h2>Fichier chiffré</h2>
               <button className="btn-icon" onClick={() => { setMnemonicImport(null); setMnemonicInput(''); setMnemonicError(''); }}>✕</button>
             </div>
             <div className="modal-form">
-              <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: '0 0 12px' }}>
+              <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.6 }}>
                 Ce fichier a été chiffré avec une phrase de récupération. Entrez les 12 mots pour le déchiffrer.
               </p>
               <div className="form-group">
-                <label>Phrase de récupération (12 mots séparés par des espaces)</label>
+                <label>Phrase de récupération</label>
                 <input type="text" value={mnemonicInput} onChange={e => { setMnemonicInput(e.target.value); setMnemonicError(''); }}
-                  placeholder="mot1 mot2 mot3 ... mot12"
+                  placeholder="mot1 mot2 mot3 … mot12"
                   className={mnemonicError ? 'input-error' : ''}
                   onKeyDown={e => { if (e.key === 'Enter') handleMnemonicImportConfirm(); }}
                   autoFocus />
@@ -707,7 +860,7 @@ export default function App() {
               <div className="modal-actions">
                 <button className="btn-secondary" onClick={() => { setMnemonicImport(null); setMnemonicInput(''); setMnemonicError(''); }}>Annuler</button>
                 <button className="btn-primary" onClick={handleMnemonicImportConfirm} disabled={!mnemonicInput.trim()}>
-                  🔓 Déchiffrer et importer
+                  Déchiffrer et importer
                 </button>
               </div>
             </div>

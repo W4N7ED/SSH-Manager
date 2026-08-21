@@ -77,6 +77,11 @@ export default function SetupWizard({ onComplete, portable = false }: Props) {
   return (
     <div className="setup-overlay">
       <div className="setup-wizard">
+        <div className="setup-brand">
+          <span className="titlebar-icon" />
+          <span>SSH Manager</span>
+        </div>
+
         {/* Step indicators */}
         <div className="setup-steps">
           {(['welcome', 'show', 'verify', 'done'] as Step[]).map((s, i) => (

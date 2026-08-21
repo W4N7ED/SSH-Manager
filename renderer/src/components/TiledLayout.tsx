@@ -34,9 +34,22 @@ export default function TiledLayout({
   draggingTabId, terminalTheme, onStatusChange, onCloseTab, onDropToQuadrant,
   onRemoveFromTile, onSyncInput, onThemeChange,
 }: Props) {
+  const panelCount = Object.keys(tiledTabs).length;
+  const syncedPanelCount = Object.values(tiledTabs).filter(id => id && syncedTabIds.has(id)).length;
+
   return (
-    <div className="tiled-grid">
-      {ALL_QUADRANTS.map(quadrant => {
+    <div className="tiled-layout">
+      <div className="tiled-header">
+        <span className="tiled-title">Mosaïque</span>
+        <span className="tiled-badge">
+          {syncedPanelCount > 1 ? `SYNC · ${syncedPanelCount} panneaux` : `${panelCount} panneau${panelCount > 1 ? 'x' : ''}`}
+        </span>
+        <span className="tiled-spacer" />
+        <span className="tiled-hint">Glissez un onglet dans un coin pour l'ajouter</span>
+      </div>
+
+      <div className="tiled-grid">
+      {ALL_QUADRANTS.map((quadrant, index) => {
         const tabId = tiledTabs[quadrant];
         const tab = tabId ? tabs.find(t => t.id === tabId) : undefined;
         const conn = tab ? connections.find(c => c.id === tab.connectionId) : undefined;
@@ -46,12 +59,15 @@ export default function TiledLayout({
         if (tab && conn) {
           const tabRef = tabRefs.get(tab.id) ?? React.createRef<TerminalTabHandle>();
           return (
-            <div key={quadrant} className="tile-cell">
+            <div key={quadrant} className={`tile-cell ${isSynced ? 'tile-cell--synced' : ''}`}>
               <div className="tile-header">
-                <span className="tile-label">{QUADRANT_LABELS[quadrant]}</span>
+                <span className={`status-dot ${tab.status === 'connected' ? 'status-dot--on' : ''}`} />
+                <span className="tile-label">{tab.connectionName}</span>
+                <span className="tile-spacer" />
+                <span className="tile-index">{index + 1}</span>
                 <button
                   className="tile-undock"
-                  title="Retirer du mode tuilé"
+                  title="Retirer de la mosaïque"
                   onClick={() => onRemoveFromTile(quadrant)}
                 >
                   ⊡
@@ -96,13 +112,14 @@ export default function TiledLayout({
             }}
           >
             <div className="tile-drop-hint">
-              <div className="tile-drop-icon">⊕</div>
+              <div className="tile-drop-icon">+</div>
               <div>{QUADRANT_LABELS[quadrant]}</div>
               <div className="tile-drop-sub">Déposez un onglet ici</div>
             </div>
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

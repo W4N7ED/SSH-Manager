@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { Connection, ConnectionType } from '../types';
+import { CONNECTION_COLOR_PALETTE } from '../connection-colors';
+import KeyGenerator from './KeyGenerator';
 
 interface Props {
   connection: Connection | null;
@@ -36,7 +38,9 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
   const [privateKeyPath, setPrivateKeyPath] = useState(connection?.privateKeyPath ?? '');
   const [ftpSecure, setFtpSecure] = useState(connection?.ftpSecure ?? false);
   const [useKey, setUseKey] = useState(!!connection?.privateKeyPath);
+  const [showKeyGenerator, setShowKeyGenerator] = useState(false);
   const [favorite, setFavorite] = useState(connection?.favorite ?? false);
+  const [tileColor, setTileColor] = useState(connection?.color ?? '');
 
   // ── Group state ──────────────────────────────────────────────
   // groupMode: 'existing' | 'new' | 'none'
@@ -90,8 +94,7 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
     return Object.keys(e).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const submit = () => {
     if (!validate()) return;
     const conn: Connection = {
       id: connection?.id ?? newId,
@@ -103,9 +106,25 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
       ftpSecure: type === 'ftp' ? ftpSecure : undefined,
       group: resolveGroup(),
       favorite: favorite || undefined,
+      color: tileColor || undefined,
       createdAt: connection?.createdAt ?? Date.now(),
+      // L'édition ne doit pas effacer l'historique d'utilisation.
+      lastUsedAt: connection?.lastUsedAt,
     };
     onSave(conn);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    submit();
+  };
+
+  /** Ctrl+Entrée enregistre depuis n'importe quel champ du formulaire. */
+  const handleFormKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && e.ctrlKey) {
+      e.preventDefault();
+      submit();
+    }
   };
 
   const selectValue = groupMode === 'none' ? '' : groupMode === 'new' ? '__new__' : selectedGroup;
@@ -118,14 +137,14 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
           <button className="btn-icon" onClick={onClose}>✕</button>
         </div>
 
-        <form className="modal-form" onSubmit={handleSubmit}>
+        <form className="modal-form" onSubmit={handleSubmit} onKeyDown={handleFormKeyDown}>
           {/* Type */}
           <div className="form-group">
-            <label>Type de connexion</label>
+            <label>Type</label>
             <div className="type-selector">
               {(['ssh', 'sftp', 'ftp'] as ConnectionType[]).map(t => (
                 <button key={t} type="button" className={`type-btn ${type === t ? 'active' : ''}`} onClick={() => handleTypeChange(t)}>
-                  {t === 'ssh' ? '▶ SSH' : t === 'sftp' ? '⇅ SFTP' : '≈ FTP'}
+                  {t.toUpperCase()}
                 </button>
               ))}
             </div>
@@ -168,6 +187,29 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
             </label>
           </div>
 
+          {/* Tile color */}
+          <div className="form-group">
+            <label>Couleur de la tuile</label>
+            <div className="form-color-row">
+              <button
+                type="button"
+                className={`palette-swatch palette-swatch--none ${!tileColor ? 'active' : ''}`}
+                title="Aucune (utiliser la couleur du groupe)"
+                onClick={() => setTileColor('')}
+              >✕</button>
+              {CONNECTION_COLOR_PALETTE.map(c => (
+                <button
+                  key={c}
+                  type="button"
+                  className={`palette-swatch ${tileColor === c ? 'active' : ''}`}
+                  style={{ background: c }}
+                  title={c}
+                  onClick={() => setTileColor(c)}
+                />
+              ))}
+            </div>
+          </div>
+
           {/* Host + Port */}
           <div className="form-row">
             <div className={`form-group flex3 ${errors.host ? 'has-error' : ''}`}>
@@ -194,8 +236,8 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
             <div className="form-group">
               <label>Authentification</label>
               <div className="auth-toggle">
-                <button type="button" className={`type-btn ${!useKey ? 'active' : ''}`} onClick={() => setUseKey(false)}>🔑 Mot de passe</button>
-                <button type="button" className={`type-btn ${useKey ? 'active' : ''}`} onClick={() => setUseKey(true)}>📄 Clé privée</button>
+                <button type="button" className={`type-btn ${useKey ? 'active' : ''}`} onClick={() => setUseKey(true)}>Clé privée</button>
+                <button type="button" className={`type-btn ${!useKey ? 'active' : ''}`} onClick={() => setUseKey(false)}>Mot de passe</button>
               </div>
             </div>
           )}
@@ -213,7 +255,15 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
               <div className="file-picker">
                 <input type="text" value={privateKeyPath} readOnly placeholder="C:\Users\user\.ssh\id_rsa" />
                 <button type="button" className="btn-secondary" onClick={async () => { const p = await window.electronAPI.pickKeyFile(); if (p) setPrivateKeyPath(p); }}>Parcourir…</button>
+                <button type="button" className="btn-secondary" onClick={() => setShowKeyGenerator(true)}>Générer…</button>
               </div>
+              {showKeyGenerator && (
+                <KeyGenerator
+                  connectionLabel={name || host}
+                  onGenerated={path => { setPrivateKeyPath(path); setErrors(prev => ({ ...prev, privateKeyPath: '' })); }}
+                  onCancel={() => setShowKeyGenerator(false)}
+                />
+              )}
               {errors.privateKeyPath && <span className="field-error">{errors.privateKeyPath}</span>}
             </div>
           )}
@@ -239,12 +289,11 @@ export default function ConnectionForm({ connection, newId, groups, defaultGroup
 
           <div className="modal-actions">
             {isEdit && onDelete && (
-              <button type="button" className="btn-danger" onClick={handleDelete} style={{ marginRight: 'auto' }}>
-                🗑 Supprimer
-              </button>
+              <button type="button" className="btn-danger" onClick={handleDelete}>Supprimer</button>
             )}
+            <span className="modal-hint">Ctrl+Entrée pour enregistrer</span>
             <button type="button" className="btn-secondary" onClick={onClose}>Annuler</button>
-            <button type="submit" className="btn-primary">{isEdit ? '✓ Enregistrer' : '+ Créer'}</button>
+            <button type="submit" className="btn-primary">{isEdit ? 'Enregistrer' : 'Créer'}</button>
           </div>
         </form>
       </div>

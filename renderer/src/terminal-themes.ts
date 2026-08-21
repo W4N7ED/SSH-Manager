@@ -14,6 +14,11 @@ export interface TerminalThemeConfig {
 
 export const TERMINAL_PRESETS: TerminalThemeConfig[] = [
   {
+    // Thème par défaut : prolonge la direction graphique « Minuit » de l'interface.
+    id: 'minuit', label: 'Minuit',
+    background: '#0e0b16', foreground: '#d9d4e8', cursor: '#9a6bff',
+  },
+  {
     id: 'github-dark', label: 'GitHub Dark',
     background: '#0d1117', foreground: '#e6edf3', cursor: '#58a6ff',
   },

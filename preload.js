@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  appGetVersion: () => ipcRenderer.invoke('app:getVersion'),
+  clipboardCopy: (p) => ipcRenderer.invoke('clipboard:copy', p),
+
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowMaximize: () => ipcRenderer.invoke('window:maximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
@@ -27,6 +30,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sshOpenInPowerShell: (c) => ipcRenderer.invoke('ssh:openInPowerShell', c),
   sshOpenInCmd: (c) => ipcRenderer.invoke('ssh:openInCmd', c),
   sshForgetHostKey: (p) => ipcRenderer.invoke('ssh:forgetHostKey', p),
+  sshGetHostKeyFingerprint: (p) => ipcRenderer.invoke('ssh:getHostKeyFingerprint', p),
+  sshGenerateKey: (p) => ipcRenderer.invoke('ssh:generateKey', p),
   onSshData: (tabId, cb) => {
     const ch = 'ssh:data:' + tabId;
     ipcRenderer.on(ch, (_, d) => cb(d));
