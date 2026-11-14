@@ -28,6 +28,7 @@ russh-sftp.workspace         = true
 alacritty_terminal.workspace = true
 suppaftp.workspace           = true
 dirs.workspace               = true
+rand.workspace               = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
