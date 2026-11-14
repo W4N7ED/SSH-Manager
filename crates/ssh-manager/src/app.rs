@@ -6,6 +6,7 @@ use crate::screens::setup::{SetupOutcome, SetupScreen};
 use crate::screens::unlock::{UnlockOutcome, UnlockScreen};
 use crate::startup::{self, Start};
 use crate::theme::{self, color};
+use crate::window_chrome;
 use crate::workspace::Workspace;
 
 enum Screen {
@@ -40,6 +41,7 @@ impl SshManagerApp {
 impl eframe::App for SshManagerApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        window_chrome::title_bar(ui);
         let next = match &mut self.screen {
             Screen::Setup(setup) => match setup.ui(ui) {
                 SetupOutcome::Created { vault, data } => Some(Screen::Workspace(Box::new(
@@ -69,6 +71,8 @@ impl eframe::App for SshManagerApp {
         if let Some(next) = next {
             self.screen = next;
         }
+        // En dernier : les poignées passent devant tout le reste de l'interface.
+        window_chrome::resize_handles(ui);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

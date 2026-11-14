@@ -10,6 +10,7 @@ mod session;
 mod startup;
 mod theme;
 mod widgets;
+mod window_chrome;
 mod workspace;
 
 use std::fs::File;
@@ -53,7 +54,9 @@ fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
         .with_title("SSH Manager")
         .with_inner_size([1400.0, 900.0])
-        .with_min_inner_size([960.0, 600.0]);
+        .with_min_inner_size([960.0, 600.0])
+        // Barre de titre native retirée : l'app dessine la sienne (window_chrome).
+        .with_decorations(false);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
