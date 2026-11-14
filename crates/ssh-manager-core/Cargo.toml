@@ -1,0 +1,15 @@
+[package]
+name = "ssh-manager-core"
+description = "Domaine de SSH Manager : connexions, groupes, générateur de mots de passe. Aucune entrée/sortie."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+rand.workspace  = true
+uuid.workspace  = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,16 @@
+# ── Build ─────────────────────────────────────────────────────
+/target/
+*.pdb
+
+# ── Données locales de l'app (ne jamais committer) ────────────
+vault.json
+vault.json.tmp
+
+# ── IDE / OS ──────────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# ── Claude Code (config locale) ───────────────────────────────
+.claude/settings.local.json

@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ssh-manager-core",
+    "crates/ssh-manager-vault",
+    "crates/ssh-manager",
+]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+license = "GPL-3.0"
+rust-version = "1.100"
+
+# Versions centralisées : chaque crate du workspace s'y réfère avec
+# `{ workspace = true }`, ce qui garantit une seule version par dépendance.
+[workspace.dependencies]
+ssh-manager-core  = { path = "crates/ssh-manager-core" }
+ssh-manager-vault = { path = "crates/ssh-manager-vault" }
+
+# Sérialisation et erreurs
+serde      = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror  = "2.0.21"
+anyhow     = "1.0.104"
+
+# Journalisation structurée
+tracing            = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+# Cryptographie (RustCrypto, même génération digest 0.11 / cipher 0.5)
+aes-gcm = "0.11.1"
+aes     = "0.9.4"
+cbc     = { version = "0.2.1", features = ["alloc"] }
+pbkdf2  = "0.13.0"
+sha2    = "0.11.1"
+hmac    = "0.13.0"
+zeroize = { version = "1.9.1", features = ["derive"] }
+rand    = "0.10.3"
+bip39   = "3.0.0"
+base64  = "0.23.1"
+
+# Système
+dirs    = "7.0.0"
+uuid    = { version = "1.29.2", features = ["v4", "serde"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+] }
+
+# Application
+eframe             = "0.37.0"
+egui               = "0.37.0"
+rfd                = "0.18.0"
+tokio              = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+russh              = "0.65.1"
+russh-sftp         = "3.0.1"
+alacritty_terminal = "0.26.0"
+suppaftp           = { version = "12.2.1", features = ["tokio-rustls-ring"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,33 @@
+[package]
+name = "ssh-manager"
+description = "Gestionnaire de connexions SSH, SFTP et FTP pour Windows."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ssh-manager"
+path = "src/main.rs"
+
+[dependencies]
+ssh-manager-core.workspace  = true
+ssh-manager-vault.workspace = true
+anyhow.workspace             = true
+thiserror.workspace          = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+eframe.workspace             = true
+egui.workspace               = true
+rfd.workspace                = true
+serde.workspace              = true
+serde_json.workspace         = true
+tokio.workspace              = true
+russh.workspace              = true
+russh-sftp.workspace         = true
+alacritty_terminal.workspace = true
+suppaftp.workspace           = true
+dirs.workspace               = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
