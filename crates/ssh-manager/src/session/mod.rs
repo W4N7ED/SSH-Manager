@@ -5,6 +5,7 @@ pub mod emulator;
 pub mod keys;
 pub mod palette;
 pub mod ssh;
+pub mod transport;
 pub mod view;
 
 #[cfg(test)]

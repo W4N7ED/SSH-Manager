@@ -80,6 +80,13 @@ impl ConnectionLibrary {
         }
     }
 
+    /// Mémorise (ou oublie) le mot de passe d'une connexion, sans toucher au reste.
+    pub fn set_password(&mut self, id: &str, password: Option<String>) {
+        if let Some(connection) = self.connections.iter_mut().find(|c| c.id == id) {
+            connection.password = password;
+        }
+    }
+
     /// Note l'ouverture d'une session sur la connexion.
     pub fn mark_used(&mut self, id: &str, timestamp: i64) {
         if let Some(connection) = self.connections.iter_mut().find(|c| c.id == id) {
@@ -283,6 +290,18 @@ mod tests {
         assert_eq!(
             visible.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             vec!["db"]
+        );
+    }
+
+    #[test]
+    fn should_store_a_password_without_touching_other_fields() {
+        let mut library = library();
+        library.set_password("web", Some("s3cret".into()));
+        let web = library.find("web").unwrap();
+        assert_eq!(web.password.as_deref(), Some("s3cret"));
+        assert_eq!(
+            (web.kind, web.group.as_deref()),
+            (ConnectionKind::Ssh, Some("Production"))
         );
     }
 

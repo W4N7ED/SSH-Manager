@@ -103,6 +103,10 @@ fn control_byte(key: Key) -> Option<u8> {
 /// Texte collé, encadré si le serveur a activé le collage délimité : un shell
 /// moderne n'exécute alors rien avant la validation explicite.
 pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
+    // Un texte copié se termine souvent par un saut de ligne (ligne entière
+    // sélectionnée) : collé tel quel, il validerait la commande et le curseur
+    // passerait à la ligne suivante. On le retire pour coller sur la ligne du prompt.
+    let text = text.trim_end_matches(['\r', '\n']);
     // Les fins de ligne Windows deviendraient des lignes vides dans le shell distant.
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if bracketed {
@@ -158,6 +162,15 @@ mod tests {
     #[test]
     fn should_normalize_windows_line_endings_when_pasting() {
         assert_eq!(paste("a\r\nb\nc", false), b"a\rb\rc".to_vec());
+    }
+
+    #[test]
+    fn should_drop_trailing_line_breaks_so_the_paste_stays_on_the_prompt() {
+        assert_eq!(paste("ls -la\r\n", false), b"ls -la".to_vec());
+        assert_eq!(
+            paste("ls -la\n\n", true),
+            b"\x1b[200~ls -la\x1b[201~".to_vec()
+        );
     }
 
     #[test]

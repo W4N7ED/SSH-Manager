@@ -19,6 +19,8 @@ use super::emulator::{Emulator, GridSize};
 use super::keys;
 use super::palette;
 use super::ssh::{SshSession, lock};
+use crate::clipboard;
+use crate::settings::PasteMode;
 use crate::theme;
 
 const FONT_SIZE: f32 = 14.0;
@@ -45,7 +47,7 @@ fn measure(ui: &Ui) -> CellMetrics {
 }
 
 /// Affiche la session ; renvoie la taille de grille en cours.
-pub fn show(ui: &mut Ui, session: &SshSession) -> GridSize {
+pub fn show(ui: &mut Ui, session: &SshSession, paste_mode: PasteMode) -> GridSize {
     let metrics = measure(ui);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let grid_rect = rect.shrink2(PADDING);
@@ -78,8 +80,15 @@ pub fn show(ui: &mut Ui, session: &SshSession) -> GridSize {
         session.resize(size);
     }
     handle_mouse(ui, &response, &mut emulator, grid_rect, metrics);
+    if paste_mode == PasteMode::RightClick
+        && response.secondary_clicked()
+        && let Some(text) = clipboard::read_text()
+    {
+        response.request_focus();
+        paste(&mut emulator, session, &text);
+    }
     if response.has_focus() {
-        handle_keyboard(ui, &mut emulator, session);
+        handle_keyboard(ui, &mut emulator, session, paste_mode);
     }
     paint(
         ui,
@@ -92,7 +101,16 @@ pub fn show(ui: &mut Ui, session: &SshSession) -> GridSize {
     size
 }
 
-fn handle_keyboard(ui: &Ui, emulator: &mut Emulator, session: &SshSession) {
+fn paste(emulator: &mut Emulator, session: &SshSession, text: &str) {
+    let bracketed = emulator.mode().contains(TermMode::BRACKETED_PASTE);
+    let bytes = keys::paste(text, bracketed);
+    if !bytes.is_empty() {
+        emulator.scroll_to_bottom();
+        session.send(bytes);
+    }
+}
+
+fn handle_keyboard(ui: &Ui, emulator: &mut Emulator, session: &SshSession, paste_mode: PasteMode) {
     let mode = emulator.mode();
     let events = ui.input(|input| input.events.clone());
     for event in events {
@@ -104,9 +122,14 @@ fn handle_keyboard(ui: &Ui, emulator: &mut Emulator, session: &SshSession) {
                 modifiers,
                 ..
             } => keys::encode(key, modifiers, mode.contains(TermMode::APP_CURSOR)),
-            Event::Paste(text) => {
-                Some(keys::paste(&text, mode.contains(TermMode::BRACKETED_PASTE)))
-            }
+            Event::Paste(text) => match paste_mode {
+                PasteMode::CtrlV => {
+                    Some(keys::paste(&text, mode.contains(TermMode::BRACKETED_PASTE)))
+                }
+                // Ctrl+V n'est pas le geste de collage choisi : il part au shell
+                // comme caractère de contrôle (insertion littérale sous bash).
+                PasteMode::RightClick => Some(vec![0x16]),
+            },
             // Ctrl+C : copie s'il y a une sélection, sinon interruption (comme l'ancienne app).
             Event::Copy => match emulator
                 .term()

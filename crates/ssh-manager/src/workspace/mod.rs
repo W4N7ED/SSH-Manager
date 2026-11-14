@@ -6,6 +6,7 @@ mod list;
 mod password_prompt;
 mod rail;
 mod sessions;
+mod settings_dialog;
 mod top_bar;
 
 use std::time::{Duration, Instant};
@@ -15,13 +16,16 @@ use ssh_manager_core::{Connection, GroupFilter, KindFilter};
 use ssh_manager_vault::{Vault, VaultData};
 use tokio::runtime::Runtime;
 
+use crate::files::FileBrowser;
+use crate::files::view::BrowserView;
 use crate::session::ssh::SshSession;
+use crate::settings::Settings;
 use crate::theme::{self, color, radius};
 
 pub use form::ConnectionForm;
 pub use list::SortState;
 use password_prompt::{PasswordPrompt, PromptResult};
-use sessions::{ActiveTab, INITIAL_SIZE, OpenSession};
+use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind};
 
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
 
@@ -37,6 +41,9 @@ pub struct Notice {
 pub enum Action {
     Select(String),
     Open(String),
+    /// Ouvre une connexion SSH en navigateur de fichiers (SFTP).
+    OpenFiles(String),
+    OpenSettings,
     NewConnection {
         group: Option<String>,
     },
@@ -84,6 +91,8 @@ pub struct Workspace {
     pub sessions: Vec<OpenSession>,
     next_session_id: u64,
     pub active: ActiveTab,
+    pub settings: Settings,
+    settings_open: bool,
 }
 
 impl Workspace {
@@ -113,6 +122,8 @@ impl Workspace {
             sessions: Vec::new(),
             next_session_id: 1,
             active: ActiveTab::Home,
+            settings: Settings::load(),
+            settings_open: false,
         };
         if let Some(text) = notice {
             workspace.notify(text, true);
@@ -158,7 +169,12 @@ impl Workspace {
                         if let Some(session) =
                             self.sessions.iter_mut().find(|session| session.id == id)
                         {
-                            sessions::session_panel(session, ui, &mut actions);
+                            sessions::session_panel(
+                                session,
+                                self.settings.paste_mode,
+                                ui,
+                                &mut actions,
+                            );
                         }
                     }
                 });
@@ -213,11 +229,22 @@ impl Workspace {
                 remember,
             } = result
             {
+                // Seul le mot de passe est enregistré : la connexion a pu être
+                // ouverte sous un autre protocole (SSH ouverte en SFTP).
                 if remember {
-                    self.data.library.upsert(connection.clone());
+                    self.data
+                        .library
+                        .set_password(&connection.id, connection.password.clone());
                     self.persist();
                 }
                 self.start_session(connection);
+            }
+        }
+        if self.settings_open && settings_dialog::show(ui.ctx(), &mut self.settings) {
+            self.settings_open = false;
+            if let Err(error) = self.settings.save() {
+                tracing::error!(%error, "failed to save the settings");
+                self.notify(format!("Réglages non enregistrés : {error}"), false);
             }
         }
     }
@@ -229,7 +256,6 @@ impl Workspace {
             .iter()
             .filter_map(|session| {
                 session
-                    .ssh
                     .take_learned_host_key()
                     .map(|key| (session.connection.host_key_id(), key))
             })
@@ -247,6 +273,8 @@ impl Workspace {
     fn apply(&mut self, action: Action) {
         match action {
             Action::Open(id) => self.open(&id),
+            Action::OpenFiles(id) => self.open_files(&id),
+            Action::OpenSettings => self.settings_open = true,
             Action::CloseSession(id) => self.close_session(id),
             Action::Reconnect(id) => self.reconnect(id, false),
             Action::RetryWithPassword(id) => self.reconnect(id, true),
@@ -311,18 +339,24 @@ impl Workspace {
         self.persist();
     }
 
-    /// Ouvre une connexion enregistrée : demande le mot de passe si besoin.
+    /// Ouvre une connexion enregistrée avec son propre protocole : terminal pour
+    /// SSH, navigateur de fichiers pour SFTP et FTP.
     fn open(&mut self, id: &str) {
-        let Some(connection) = self.data.library.find(id).cloned() else {
-            return;
-        };
-        if connection.kind.is_file_transfer() {
-            self.notify(
-                "Le navigateur de fichiers SFTP/FTP arrive à l'étape suivante.",
-                true,
-            );
-            return;
+        if let Some(connection) = self.data.library.find(id).cloned() {
+            self.open_connection(connection);
         }
+    }
+
+    /// Ouvre une connexion SSH en navigateur de fichiers, sur le même serveur.
+    fn open_files(&mut self, id: &str) {
+        if let Some(mut connection) = self.data.library.find(id).cloned() {
+            connection.kind = ssh_manager_core::ConnectionKind::Sftp;
+            self.open_connection(connection);
+        }
+    }
+
+    /// Demande le mot de passe si besoin, puis démarre la session.
+    fn open_connection(&mut self, connection: Connection) {
         if connection.needs_password_prompt() {
             self.password_prompt = Some(PasswordPrompt::new(connection));
         } else {
@@ -334,20 +368,32 @@ impl Workspace {
         self.data.library.mark_used(&connection.id, now_millis());
         self.persist();
         let pinned = self.data.host_keys.get(&connection.host_key_id()).cloned();
-        let ssh = SshSession::start(
-            &self.runtime,
-            self.ctx.clone(),
-            connection.clone(),
-            pinned,
-            INITIAL_SIZE,
-        );
+        let kind = if connection.kind.is_file_transfer() {
+            let browser =
+                FileBrowser::start(&self.runtime, self.ctx.clone(), connection.clone(), pinned);
+            SessionKind::Files {
+                browser,
+                view: BrowserView::default(),
+            }
+        } else {
+            let ssh = SshSession::start(
+                &self.runtime,
+                self.ctx.clone(),
+                connection.clone(),
+                pinned,
+                INITIAL_SIZE,
+            );
+            SessionKind::Terminal {
+                ssh,
+                size: INITIAL_SIZE,
+            }
+        };
         let id = self.next_session_id;
         self.next_session_id += 1;
         self.sessions.push(OpenSession {
             id,
             connection,
-            ssh,
-            size: INITIAL_SIZE,
+            kind,
         });
         self.active = ActiveTab::Session(id);
     }
@@ -396,7 +442,7 @@ impl Workspace {
         let live = self
             .sessions
             .iter()
-            .filter(|session| session.ssh.state().is_live())
+            .filter(|session| session.state().is_live())
             .count();
         let sessions = match live {
             0 => "aucune session active".to_owned(),

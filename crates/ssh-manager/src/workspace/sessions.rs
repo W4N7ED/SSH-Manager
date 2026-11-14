@@ -1,12 +1,15 @@
-//! Onglets de session et panneau du terminal.
+//! Onglets de session : terminal SSH ou navigateur de fichiers.
 
 use egui::{Color32, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use ssh_manager_core::Connection;
 
 use super::{Action, Workspace};
+use crate::files::FileBrowser;
+use crate::files::view::{self as files_view, BrowserView};
 use crate::session::emulator::GridSize;
 use crate::session::ssh::{SessionError, SessionState, SshSession};
 use crate::session::view;
+use crate::settings::PasteMode;
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
@@ -16,11 +19,41 @@ pub const INITIAL_SIZE: GridSize = GridSize {
     rows: 32,
 };
 
+pub enum SessionKind {
+    Terminal {
+        ssh: SshSession,
+        size: GridSize,
+    },
+    Files {
+        browser: FileBrowser,
+        view: BrowserView,
+    },
+}
+
 pub struct OpenSession {
     pub id: u64,
     pub connection: Connection,
-    pub ssh: SshSession,
-    pub size: GridSize,
+    pub kind: SessionKind,
+}
+
+impl OpenSession {
+    pub fn state(&self) -> SessionState {
+        match &self.kind {
+            SessionKind::Terminal { ssh, .. } => ssh.state(),
+            SessionKind::Files { browser, .. } => browser.state(),
+        }
+    }
+
+    pub fn take_learned_host_key(&self) -> Option<String> {
+        match &self.kind {
+            SessionKind::Terminal { ssh, .. } => ssh.take_learned_host_key(),
+            SessionKind::Files { browser, .. } => browser.take_learned_host_key(),
+        }
+    }
+
+    fn is_files(&self) -> bool {
+        matches!(self.kind, SessionKind::Files { .. })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,15 +97,19 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
                         workspace.active = ActiveTab::Home;
                     }
                     for session in &workspace.sessions {
-                        let state = session.ssh.state();
+                        let state = session.state();
                         let active = workspace.active == ActiveTab::Session(session.id);
-                        let (response, close) = tab(
-                            ui,
-                            active,
-                            Some(status_color(&state)),
-                            &session.connection.name,
-                            true,
-                        );
+                        let label = if session.is_files() {
+                            format!(
+                                "{}  {}",
+                                session.connection.name,
+                                session.connection.kind.label()
+                            )
+                        } else {
+                            session.connection.name.clone()
+                        };
+                        let (response, close) =
+                            tab(ui, active, Some(status_color(&state)), &label, true);
                         if close {
                             actions.push(Action::CloseSession(session.id));
                         } else if response.clicked() {
@@ -155,19 +192,71 @@ fn tab(
     (response, close)
 }
 
-pub fn session_panel(session: &mut OpenSession, ui: &mut Ui, actions: &mut Vec<Action>) {
-    let state = session.ssh.state();
+pub fn session_panel(
+    session: &mut OpenSession,
+    paste_mode: PasteMode,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
+    let state = session.state();
+    if let SessionState::Failed(error) = &state {
+        Frame::new()
+            .fill(color::SURFACE)
+            .corner_radius(CornerRadius::same(radius::MEDIUM))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                toolbar(session, &state, ui, actions);
+                failure(session, error, ui, actions);
+            });
+        return;
+    }
+    match &mut session.kind {
+        SessionKind::Files { browser, view } => {
+            if matches!(state, SessionState::Connecting) {
+                connecting(ui, &session.connection);
+            } else if files_view::show(ui, browser, view).is_some() {
+                actions.push(Action::CloseSession(session.id));
+            }
+        }
+        SessionKind::Terminal { .. } => terminal_panel(session, &state, paste_mode, ui, actions),
+    }
+}
+
+fn connecting(ui: &mut Ui, connection: &Connection) {
+    Frame::new()
+        .fill(color::SURFACE)
+        .corner_radius(CornerRadius::same(radius::MEDIUM))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() / 2.0 - 30.0);
+                ui.spinner();
+                ui.label(
+                    RichText::new(format!("Connexion à {}…", connection.target()))
+                        .font(theme::mono(12.0))
+                        .color(color::TEXT_MUTED),
+                );
+            });
+        });
+}
+
+fn terminal_panel(
+    session: &mut OpenSession,
+    state: &SessionState,
+    paste_mode: PasteMode,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
     Frame::new()
         .fill(crate::session::palette::BACKGROUND)
         .stroke(Stroke::new(1.0, color::BORDER_SUBTLE))
         .corner_radius(CornerRadius::same(radius::MEDIUM))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            toolbar(session, &state, ui, actions);
+            toolbar(session, state, ui, actions);
             ui.add(egui::Separator::default().spacing(0.0));
-            match &state {
-                SessionState::Failed(error) => failure(session, error, ui, actions),
-                _ => session.size = view::show(ui, &session.ssh),
+            if let SessionKind::Terminal { ssh, size } = &mut session.kind {
+                *size = view::show(ui, ssh, paste_mode);
             }
         });
 }
@@ -180,9 +269,12 @@ fn toolbar(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &m
                 ui.label(RichText::new(session.connection.target()).font(theme::mono(12.0)));
                 let description = match state {
                     SessionState::Connecting => "connexion…".to_owned(),
-                    SessionState::Connected => {
-                        format!("{}×{}", session.size.columns, session.size.rows)
-                    }
+                    SessionState::Connected => match &session.kind {
+                        SessionKind::Terminal { size, .. } => {
+                            format!("{}×{}", size.columns, size.rows)
+                        }
+                        SessionKind::Files { .. } => "connecté".to_owned(),
+                    },
                     SessionState::Closed { reason } => {
                         reason.clone().unwrap_or_else(|| "déconnecté".into())
                     }

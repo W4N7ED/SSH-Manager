@@ -49,6 +49,14 @@ pub fn show(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
                     if widgets::primary_button(ui, "+ Nouvelle connexion").clicked() {
                         actions.push(Action::NewConnection { group });
                     }
+                    let settings =
+                        egui::Button::new(RichText::new("⚙").size(15.0).color(color::TEXT_MUTED))
+                            .fill(color::SURFACE)
+                            .corner_radius(CornerRadius::same(radius::PILL))
+                            .min_size(egui::vec2(34.0, 34.0));
+                    if ui.add(settings).on_hover_text("Réglages").clicked() {
+                        actions.push(Action::OpenSettings);
+                    }
                 });
             });
         });

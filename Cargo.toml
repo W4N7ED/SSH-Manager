@@ -22,7 +22,6 @@ ssh-manager-vault = { path = "crates/ssh-manager-vault" }
 serde      = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror  = "2.0.21"
-anyhow     = "1.0.104"
 
 # Journalisation structurée
 tracing            = "0.1.44"
@@ -52,16 +51,22 @@ windows = { version = "0.62.2", features = [
 ] }
 
 # Application
+chrono             = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 eframe             = "0.37.0"
 egui               = "0.37.0"
 rfd                = "0.18.0"
-tokio              = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio              = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
 # `ring` plutôt que `aws-lc-rs` (défaut) : aws-lc-sys exige l'assembleur NASM
 # pour compiler sous Windows, ring n'a aucune dépendance de build externe.
 russh              = { version = "0.65.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp         = "3.0.1"
 alacritty_terminal = "0.26.0"
 suppaftp           = { version = "12.2.1", features = ["tokio-rustls-ring"] }
+# FTPS : mêmes versions que celles tirées par suppaftp. Les certificats sont
+# vérifiés par le magasin Windows (autorités d'entreprise comprises).
+rustls                   = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls             = { version = "0.26.6", default-features = false, features = ["ring"] }
+rustls-platform-verifier = "0.7.1"
 
 [profile.release]
 lto = "thin"

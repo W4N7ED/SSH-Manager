@@ -13,7 +13,6 @@ path = "src/main.rs"
 [dependencies]
 ssh-manager-core.workspace  = true
 ssh-manager-vault.workspace = true
-anyhow.workspace             = true
 thiserror.workspace          = true
 tracing.workspace            = true
 tracing-subscriber.workspace = true
@@ -27,8 +26,12 @@ russh.workspace              = true
 russh-sftp.workspace         = true
 alacritty_terminal.workspace = true
 suppaftp.workspace           = true
+rustls.workspace             = true
+tokio-rustls.workspace       = true
+rustls-platform-verifier.workspace = true
 dirs.workspace               = true
 rand.workspace               = true
+chrono.workspace             = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

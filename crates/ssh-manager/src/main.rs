@@ -5,8 +5,11 @@
 
 mod app;
 mod background;
+mod clipboard;
+mod files;
 mod screens;
 mod session;
+mod settings;
 mod startup;
 mod theme;
 mod widgets;

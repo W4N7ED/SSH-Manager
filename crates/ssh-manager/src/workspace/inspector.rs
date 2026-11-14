@@ -102,6 +102,11 @@ pub fn show(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
             if full_width_button(ui, primary, color::ACCENT, color::ON_ACCENT).clicked() {
                 actions.push(Action::Open(connection.id.clone()));
             }
+            if connection.kind == ssh_manager_core::ConnectionKind::Ssh
+                && full_width_button(ui, "Ouvrir en SFTP", color::ELEVATED, color::TEXT).clicked()
+            {
+                actions.push(Action::OpenFiles(connection.id.clone()));
+            }
             if full_width_button(ui, "Modifier", color::ELEVATED, color::TEXT).clicked() {
                 actions.push(Action::Edit(connection.id.clone()));
             }
