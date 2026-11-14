@@ -21,13 +21,14 @@ pub struct SshManagerApp {
 
 impl SshManagerApp {
     pub fn new(creation: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&creation.egui_ctx);
+        let ctx = &creation.egui_ctx;
+        theme::apply(ctx);
         let screen = match startup::determine() {
             Start::Ready {
                 vault,
                 data,
                 notice,
-            } => Screen::Workspace(Box::new(Workspace::new(vault, data, notice))),
+            } => Screen::Workspace(Box::new(Workspace::new(ctx.clone(), vault, data, notice))),
             Start::NeedsPhrase(purpose) => Screen::Unlock(UnlockScreen::new(purpose)),
             Start::NeedsSetup { imported } => Screen::Setup(SetupScreen::new(imported)),
             Start::Failed(error) => Screen::Failed(error),
@@ -38,10 +39,11 @@ impl SshManagerApp {
 
 impl eframe::App for SshManagerApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let next = match &mut self.screen {
             Screen::Setup(setup) => match setup.ui(ui) {
                 SetupOutcome::Created { vault, data } => Some(Screen::Workspace(Box::new(
-                    Workspace::new(vault, data, Some("Coffre créé.".into())),
+                    Workspace::new(ctx, vault, data, Some("Coffre créé.".into())),
                 ))),
                 SetupOutcome::Pending => None,
             },
@@ -51,7 +53,7 @@ impl eframe::App for SshManagerApp {
                     data,
                     notice,
                 } => Some(Screen::Workspace(Box::new(Workspace::new(
-                    vault, data, notice,
+                    ctx, vault, data, notice,
                 )))),
                 UnlockOutcome::Pending => None,
             },
@@ -81,6 +83,9 @@ fn failure(ui: &mut Ui, error: &str) {
         ui.add_space(10.0);
         ui.label(RichText::new(error).font(theme::mono(12.0)).color(color::TEXT_MUTED));
         ui.add_space(10.0);
-        ui.label(RichText::new("Aucune donnée n'a été modifiée. Le détail figure dans le journal de l'application.").color(color::TEXT_DIM));
+        ui.label(
+            RichText::new("Aucune donnée n'a été modifiée. Le détail figure dans le journal de l'application.")
+                .color(color::TEXT_DIM),
+        );
     });
 }

@@ -1,0 +1,249 @@
+//! Onglets de session et panneau du terminal.
+
+use egui::{Color32, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use ssh_manager_core::Connection;
+
+use super::{Action, Workspace};
+use crate::session::emulator::GridSize;
+use crate::session::ssh::{SessionError, SessionState, SshSession};
+use crate::session::view;
+use crate::theme::{self, color, radius};
+use crate::widgets;
+
+/// Taille provisoire avant le premier affichage, qui donne la taille réelle.
+pub const INITIAL_SIZE: GridSize = GridSize {
+    columns: 120,
+    rows: 32,
+};
+
+pub struct OpenSession {
+    pub id: u64,
+    pub connection: Connection,
+    pub ssh: SshSession,
+    pub size: GridSize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveTab {
+    Home,
+    Session(u64),
+}
+
+fn status_color(state: &SessionState) -> Color32 {
+    match state {
+        SessionState::Connecting => color::WARNING,
+        SessionState::Connected => color::SUCCESS,
+        SessionState::Closed { .. } => color::TEXT_DIM,
+        SessionState::Failed(_) => color::DANGER,
+    }
+}
+
+pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
+    egui::Panel::top("tab-bar")
+        .exact_size(44.0)
+        .show_separator_line(false)
+        .frame(Frame::new().fill(color::BASE).inner_margin(Margin {
+            left: 14,
+            right: 14,
+            top: 0,
+            bottom: 12,
+        }))
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if tab(
+                        ui,
+                        workspace.active == ActiveTab::Home,
+                        None,
+                        "⌂  Accueil",
+                        false,
+                    )
+                    .0
+                    .clicked()
+                    {
+                        workspace.active = ActiveTab::Home;
+                    }
+                    for session in &workspace.sessions {
+                        let state = session.ssh.state();
+                        let active = workspace.active == ActiveTab::Session(session.id);
+                        let (response, close) = tab(
+                            ui,
+                            active,
+                            Some(status_color(&state)),
+                            &session.connection.name,
+                            true,
+                        );
+                        if close {
+                            actions.push(Action::CloseSession(session.id));
+                        } else if response.clicked() {
+                            workspace.active = ActiveTab::Session(session.id);
+                        }
+                    }
+                });
+            });
+        });
+}
+
+/// Onglet en pastille ; renvoie la réponse et vrai si sa croix a été cliquée.
+fn tab(
+    ui: &mut Ui,
+    active: bool,
+    status: Option<Color32>,
+    label: &str,
+    closable: bool,
+) -> (egui::Response, bool) {
+    let font = if active {
+        theme::sans_semibold(13.0)
+    } else {
+        theme::sans(13.0)
+    };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        font,
+        if active {
+            color::TEXT
+        } else {
+            color::TEXT_MUTED
+        },
+    );
+    let status_width = if status.is_some() { 14.0 } else { 0.0 };
+    let close_width = if closable { 22.0 } else { 0.0 };
+    let width = 28.0 + status_width + galley.size().x + close_width;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+
+    let fill = match (active, response.hovered()) {
+        (true, _) => color::ELEVATED,
+        (false, true) => color::SURFACE,
+        (false, false) => Color32::TRANSPARENT,
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(radius::MEDIUM), fill);
+    let mut x = rect.left() + 14.0;
+    if let Some(status) = status {
+        painter.circle_filled(egui::pos2(x + 3.0, rect.center().y), 3.0, status);
+        x += status_width;
+    }
+    painter.galley(
+        egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+        galley.clone(),
+        color::TEXT,
+    );
+
+    let mut close = false;
+    if closable {
+        let close_rect = Rect::from_center_size(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            Vec2::splat(16.0),
+        );
+        let close_response = ui.interact(close_rect, response.id.with("close"), Sense::click());
+        let tint = if close_response.hovered() {
+            color::DANGER
+        } else {
+            color::TEXT_DIM
+        };
+        if response.hovered() || active {
+            painter.text(
+                close_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "✕",
+                theme::sans(10.0),
+                tint,
+            );
+        }
+        close = close_response.clicked();
+    }
+    (response, close)
+}
+
+pub fn session_panel(session: &mut OpenSession, ui: &mut Ui, actions: &mut Vec<Action>) {
+    let state = session.ssh.state();
+    Frame::new()
+        .fill(crate::session::palette::BACKGROUND)
+        .stroke(Stroke::new(1.0, color::BORDER_SUBTLE))
+        .corner_radius(CornerRadius::same(radius::MEDIUM))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            toolbar(session, &state, ui, actions);
+            ui.add(egui::Separator::default().spacing(0.0));
+            match &state {
+                SessionState::Failed(error) => failure(session, error, ui, actions),
+                _ => session.size = view::show(ui, &session.ssh),
+            }
+        });
+}
+
+fn toolbar(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &mut Vec<Action>) {
+    Frame::new()
+        .inner_margin(Margin::symmetric(14, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(session.connection.target()).font(theme::mono(12.0)));
+                let description = match state {
+                    SessionState::Connecting => "connexion…".to_owned(),
+                    SessionState::Connected => {
+                        format!("{}×{}", session.size.columns, session.size.rows)
+                    }
+                    SessionState::Closed { reason } => {
+                        reason.clone().unwrap_or_else(|| "déconnecté".into())
+                    }
+                    SessionState::Failed(_) => "échec".to_owned(),
+                };
+                ui.label(
+                    RichText::new(description)
+                        .font(theme::mono(11.0))
+                        .color(color::TEXT_DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let close =
+                        egui::Button::new(RichText::new("✕").size(11.0).color(color::TEXT_MUTED))
+                            .fill(color::SURFACE)
+                            .corner_radius(CornerRadius::same(radius::PILL))
+                            .min_size(Vec2::splat(28.0));
+                    if ui.add(close).on_hover_text("Fermer la session").clicked() {
+                        actions.push(Action::CloseSession(session.id));
+                    }
+                    if !state.is_live() && widgets::secondary_button(ui, "Reconnecter").clicked() {
+                        actions.push(Action::Reconnect(session.id));
+                    }
+                });
+            });
+        });
+}
+
+fn failure(session: &OpenSession, error: &SessionError, ui: &mut Ui, actions: &mut Vec<Action>) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(60.0);
+        Frame::new()
+            .fill(color::SURFACE)
+            .corner_radius(CornerRadius::same(radius::LARGE))
+            .inner_margin(Margin::same(28))
+            .show(ui, |ui| {
+                ui.set_max_width(520.0);
+                ui.label(RichText::new("Connexion échouée").font(theme::sans_bold(18.0)).color(color::DANGER));
+                ui.add_space(8.0);
+                match error {
+                    SessionError::HostKeyChanged { known, received } => {
+                        ui.label(RichText::new(
+                            "⚠ La clé d'hôte du serveur a changé. Cela peut indiquer une usurpation de serveur (« man-in-the-middle »), ou une réinstallation légitime. La connexion a été refusée.",
+                        ));
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(format!("Empreinte connue : {known}\nEmpreinte reçue : {received}")).font(theme::mono(11.0)).color(color::TEXT_MUTED));
+                        ui.add_space(12.0);
+                        if widgets::secondary_button(ui, "Je sais que le changement est légitime — faire confiance à la nouvelle clé").clicked() {
+                            actions.push(Action::TrustHostKey { session: session.id, fingerprint: received.clone() });
+                        }
+                    }
+                    SessionError::Authentication if session.connection.private_key_path.is_none() => {
+                        ui.label("Mot de passe incorrect ou méthode d'authentification refusée.");
+                        ui.add_space(12.0);
+                        if widgets::primary_button(ui, "Réessayer avec un autre mot de passe").clicked() {
+                            actions.push(Action::RetryWithPassword(session.id));
+                        }
+                    }
+                    other => {
+                        ui.label(RichText::new(other.to_string()).font(theme::mono(12.0)).color(color::TEXT_MUTED));
+                    }
+                }
+            });
+    });
+}

@@ -6,6 +6,7 @@
 mod app;
 mod background;
 mod screens;
+mod session;
 mod startup;
 mod theme;
 mod widgets;
