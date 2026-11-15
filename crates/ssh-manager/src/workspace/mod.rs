@@ -6,6 +6,7 @@ mod form;
 mod inspector;
 mod key_generator;
 mod list;
+mod mosaic;
 mod password_prompt;
 mod rail;
 mod recordings_dialog;
@@ -14,6 +15,7 @@ mod settings_dialog;
 mod toolbox;
 mod top_bar;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -34,9 +36,10 @@ use backup_dialogs::{PhraseOutcome, PhrasePrompt};
 use command_palette::{CommandPalette, PaletteOutcome};
 pub use form::ConnectionForm;
 pub use list::SortState;
+use mosaic::Mosaic;
 use password_prompt::{PasswordPrompt, PromptResult};
 use recordings_dialog::{RecordingsChoice, RecordingsDialog};
-use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind};
+use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind, TerminalPrefs, TypedInput};
 use ssh_manager_vault::backup::{self, Backup};
 
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
@@ -76,6 +79,16 @@ pub enum Action {
         plain: bool,
     },
     ImportBackup,
+    /// Ctrl+M : répartit les sessions en mosaïque, ou revient aux onglets.
+    ToggleMosaic,
+    PlaceInMosaic {
+        session: u64,
+        slot: usize,
+    },
+    RemoveFromMosaic(u64),
+    /// Inclut ou retire une session de la saisie synchronisée.
+    ToggleSync(u64),
+    SetTerminalTheme(crate::session::terminal_theme::TerminalTheme),
     NewConnection {
         group: Option<String>,
     },
@@ -132,6 +145,9 @@ pub struct Workspace {
     toolbox: toolbox::Toolbox,
     palette: Option<CommandPalette>,
     backup_phrase: Option<PhrasePrompt>,
+    pub mosaic: Mosaic,
+    /// Sessions dont la saisie est répliquée dans les autres.
+    pub synced: BTreeSet<u64>,
     confirm_plain_export: bool,
     /// Onglet à relancer en place une fois le mot de passe saisi.
     reconnect_after_prompt: Option<u64>,
@@ -171,6 +187,8 @@ impl Workspace {
             toolbox: toolbox::Toolbox::default(),
             palette: None,
             backup_phrase: None,
+            mosaic: Mosaic::default(),
+            synced: BTreeSet::new(),
             confirm_plain_export: false,
             reconnect_after_prompt: None,
         };
@@ -206,6 +224,8 @@ impl Workspace {
         sessions::tab_bar(self, ui, &mut actions);
         self.status_bar(ui);
 
+        let prefs = TerminalPrefs::from_settings(&self.settings);
+        let mut typed: Vec<TypedInput> = Vec::new();
         egui::CentralPanel::no_frame().show(ui, |ui| {
             Frame::new()
                 .inner_margin(Margin {
@@ -216,6 +236,16 @@ impl Workspace {
                 })
                 .show(ui, |ui| match self.active {
                     ActiveTab::Home => self.home(ui, &mut actions),
+                    ActiveTab::Mosaic => {
+                        typed = sessions::mosaic_panel(
+                            &mut self.sessions,
+                            &self.mosaic,
+                            &self.synced,
+                            &prefs,
+                            ui,
+                            &mut actions,
+                        );
+                    }
                     ActiveTab::Toolbox => {
                         if self
                             .toolbox
@@ -228,17 +258,13 @@ impl Workspace {
                         if let Some(session) =
                             self.sessions.iter_mut().find(|session| session.id == id)
                         {
-                            sessions::session_panel(
-                                session,
-                                self.settings.paste_mode,
-                                ui,
-                                &mut actions,
-                            );
+                            typed = sessions::session_panel(session, &prefs, ui, &mut actions);
                         }
                     }
                 });
         });
 
+        self.replay_synced_input(typed);
         self.modals(ui, &mut actions);
         self.show_notice(ui);
         for action in actions {
@@ -330,12 +356,21 @@ impl Workspace {
     /// Raccourcis de l'application, retirés du flux avant que le terminal ne
     /// les voie (comme dans l'ancienne app, ils priment sur le shell).
     fn global_shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        let (palette, new_connection) = ctx.input_mut(|input| {
+        let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+        let (palette, new_connection, toggle_mosaic, toggle_sync) = ctx.input_mut(|input| {
             (
                 input.consume_key(egui::Modifiers::CTRL, egui::Key::K),
                 input.consume_key(egui::Modifiers::CTRL, egui::Key::N),
+                input.consume_key(egui::Modifiers::CTRL, egui::Key::M),
+                input.consume_key(ctrl_shift, egui::Key::S),
             )
         });
+        if toggle_mosaic {
+            actions.push(Action::ToggleMosaic);
+        }
+        if toggle_sync && let ActiveTab::Session(id) = self.active {
+            actions.push(Action::ToggleSync(id));
+        }
         if palette {
             self.palette = match self.palette {
                 Some(_) => None,
@@ -344,6 +379,68 @@ impl Workspace {
         }
         if new_connection && self.form.is_none() {
             actions.push(Action::NewConnection { group: None });
+        }
+    }
+
+    /// Rejoue dans les autres sessions synchronisées ce qui a été tapé dans
+    /// l'une d'elles. Seules les sessions connectées reçoivent la saisie.
+    fn replay_synced_input(&self, typed: Vec<TypedInput>) {
+        for input in typed {
+            for target in mosaic::replicas(&self.synced, input.source) {
+                let Some(session) = self.sessions.iter().find(|session| session.id == target)
+                else {
+                    continue;
+                };
+                if let SessionKind::Terminal { ssh, .. } = &session.kind
+                    && session.state().is_live()
+                {
+                    ssh.send(input.bytes.clone());
+                }
+            }
+        }
+    }
+
+    fn toggle_mosaic(&mut self) {
+        if self.mosaic.is_empty() {
+            self.mosaic
+                .fill(self.sessions.iter().map(|session| session.id));
+            if !self.mosaic.is_empty() {
+                self.active = ActiveTab::Mosaic;
+            } else {
+                self.notify("Ouvrez au moins une session pour la mosaïque.", false);
+            }
+        } else {
+            self.mosaic.clear();
+            if self.active == ActiveTab::Mosaic {
+                self.active = self
+                    .sessions
+                    .first()
+                    .map_or(ActiveTab::Home, |session| ActiveTab::Session(session.id));
+            }
+        }
+    }
+
+    fn toggle_sync(&mut self, id: u64) {
+        let is_terminal = self
+            .sessions
+            .iter()
+            .any(|session| session.id == id && session.is_terminal());
+        if !is_terminal {
+            return;
+        }
+        if !self.synced.remove(&id) {
+            self.synced.insert(id);
+        }
+        tracing::info!(
+            session = id,
+            synced = self.synced.len(),
+            "synchronized input changed"
+        );
+        if self.synced.len() == 1 {
+            self.notify(
+                "Synchronisez au moins une autre session pour répliquer la saisie.",
+                true,
+            );
         }
     }
 
@@ -394,6 +491,22 @@ impl Workspace {
             Action::ExportBackup { plain: false } => self.export_backup(false),
             Action::ExportBackup { plain: true } => self.confirm_plain_export = true,
             Action::ImportBackup => self.import_backup(),
+            Action::ToggleMosaic => self.toggle_mosaic(),
+            Action::PlaceInMosaic { session, slot } => {
+                self.mosaic.place(session, slot);
+                self.active = ActiveTab::Mosaic;
+            }
+            Action::RemoveFromMosaic(id) => {
+                self.mosaic.remove(id);
+                if self.mosaic.is_empty() && self.active == ActiveTab::Mosaic {
+                    self.active = ActiveTab::Session(id);
+                }
+            }
+            Action::ToggleSync(id) => self.toggle_sync(id),
+            Action::SetTerminalTheme(theme) => {
+                self.settings.terminal_theme = theme;
+                self.save_settings();
+            }
             Action::CloseSession(id) => self.close_session(id),
             Action::Reconnect(id) => self.reconnect(id, false),
             Action::DuplicateSession(id) => self.duplicate_session(id),
@@ -550,7 +663,10 @@ impl Workspace {
     fn close_session(&mut self, id: u64) {
         // L'abandon de la session (Drop) ferme proprement la connexion.
         self.sessions.retain(|session| session.id != id);
-        if self.active == ActiveTab::Session(id) {
+        self.mosaic.remove(id);
+        self.synced.remove(&id);
+        let mosaic_emptied = self.active == ActiveTab::Mosaic && self.mosaic.is_empty();
+        if self.active == ActiveTab::Session(id) || mosaic_emptied {
             self.active = self
                 .sessions
                 .last()

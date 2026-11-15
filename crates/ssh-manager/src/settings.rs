@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use ssh_manager_vault::paths;
 
+use crate::session::terminal_theme::TerminalTheme;
+
 /// Geste qui colle le presse-papiers dans un terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +37,7 @@ pub struct Settings {
     /// Efface le presse-papiers après la copie d'un secret.
     pub clipboard_auto_clear: bool,
     pub clipboard_clear_seconds: u32,
+    pub terminal_theme: TerminalTheme,
 }
 
 impl Default for Settings {
@@ -44,6 +47,7 @@ impl Default for Settings {
             record_sessions: true,
             clipboard_auto_clear: true,
             clipboard_clear_seconds: 30,
+            terminal_theme: TerminalTheme::default(),
         }
     }
 }
@@ -108,6 +112,9 @@ mod tests {
             record_sessions: false,
             clipboard_auto_clear: false,
             clipboard_clear_seconds: 120,
+            terminal_theme: TerminalTheme::from_preset(
+                TerminalTheme::preset("nord").expect("thème Nord présent"),
+            ),
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);

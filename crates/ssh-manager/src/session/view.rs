@@ -19,6 +19,7 @@ use super::emulator::{Emulator, GridSize};
 use super::keys;
 use super::palette;
 use super::ssh::{SshSession, lock};
+use super::terminal_theme::TerminalColors;
 use crate::clipboard;
 use crate::settings::PasteMode;
 use crate::theme;
@@ -52,6 +53,9 @@ pub struct TerminalResponse {
     pub size: GridSize,
     /// Entrée pressée dans un terminal déconnecté : l'utilisateur veut se reconnecter.
     pub reconnect_requested: bool,
+    /// Ce que l'utilisateur a tapé ou collé, déjà envoyé à cette session :
+    /// la saisie synchronisée le rejoue dans les autres.
+    pub typed: Vec<Vec<u8>>,
 }
 
 /// Affiche la session. Hors connexion (`live` faux), l'écran reste lisible et
@@ -60,6 +64,7 @@ pub fn show(
     ui: &mut Ui,
     session: &SshSession,
     paste_mode: PasteMode,
+    theme: &TerminalColors,
     live: bool,
 ) -> TerminalResponse {
     let metrics = measure(ui);
@@ -95,6 +100,7 @@ pub fn show(
     }
     handle_mouse(ui, &response, &mut emulator, grid_rect, metrics);
     let mut reconnect_requested = false;
+    let mut typed = Vec::new();
     if !live {
         reconnect_requested =
             response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -119,10 +125,10 @@ pub fn show(
         && let Some(text) = clipboard::read_text()
     {
         response.request_focus();
-        paste(&mut emulator, session, &text);
+        typed.extend(paste(&mut emulator, session, &text));
     }
     if live && response.has_focus() {
-        handle_keyboard(ui, &mut emulator, session, paste_mode);
+        typed.extend(handle_keyboard(ui, &mut emulator, session, paste_mode));
     }
     paint(
         ui,
@@ -131,25 +137,37 @@ pub fn show(
         metrics,
         &emulator,
         response.has_focus() && live,
+        theme,
     );
     TerminalResponse {
         size,
         reconnect_requested,
+        typed,
     }
 }
 
-fn paste(emulator: &mut Emulator, session: &SshSession, text: &str) {
+/// Colle `text` ; renvoie les octets envoyés.
+fn paste(emulator: &mut Emulator, session: &SshSession, text: &str) -> Option<Vec<u8>> {
     let bracketed = emulator.mode().contains(TermMode::BRACKETED_PASTE);
     let bytes = keys::paste(text, bracketed);
-    if !bytes.is_empty() {
-        emulator.scroll_to_bottom();
-        session.send(bytes);
+    if bytes.is_empty() {
+        return None;
     }
+    emulator.scroll_to_bottom();
+    session.send(bytes.clone());
+    Some(bytes)
 }
 
-fn handle_keyboard(ui: &Ui, emulator: &mut Emulator, session: &SshSession, paste_mode: PasteMode) {
+/// Transmet la saisie clavier ; renvoie les octets envoyés.
+fn handle_keyboard(
+    ui: &Ui,
+    emulator: &mut Emulator,
+    session: &SshSession,
+    paste_mode: PasteMode,
+) -> Vec<Vec<u8>> {
     let mode = emulator.mode();
     let events = ui.input(|input| input.events.clone());
+    let mut sent = Vec::new();
     for event in events {
         let bytes = match event {
             Event::Text(text) => Some(text.into_bytes()),
@@ -185,9 +203,11 @@ fn handle_keyboard(ui: &Ui, emulator: &mut Emulator, session: &SshSession, paste
         };
         if let Some(bytes) = bytes {
             emulator.scroll_to_bottom();
-            session.send(bytes);
+            session.send(bytes.clone());
+            sent.push(bytes);
         }
     }
+    sent
 }
 
 fn handle_mouse(
@@ -252,9 +272,10 @@ fn paint(
     metrics: CellMetrics,
     emulator: &Emulator,
     focused: bool,
+    theme: &TerminalColors,
 ) {
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::ZERO, palette::BACKGROUND);
+    painter.rect_filled(rect, CornerRadius::ZERO, theme.background);
 
     let content = emulator.term().renderable_content();
     let display_offset = content.display_offset as i32;
@@ -281,14 +302,15 @@ fn paint(
             1.0
         };
         let target = cell_rect(indexed.point.line.0, indexed.point.column.0, width_cells);
-        let (foreground, mut background) = palette::cell_colors(cell.fg, cell.bg, cell.flags);
+        let (foreground, mut background) =
+            palette::cell_colors(cell.fg, cell.bg, cell.flags, theme);
         if content
             .selection
             .is_some_and(|range| range.contains(indexed.point))
         {
             background = palette::SELECTION;
         }
-        if background != palette::BACKGROUND {
+        if background != theme.background {
             painter.rect_filled(target, CornerRadius::ZERO, background);
         }
         if cell.c != ' ' && cell.c != '\0' {
@@ -319,13 +341,13 @@ fn paint(
             painter.rect_filled(
                 target,
                 CornerRadius::same(1),
-                palette::CURSOR.gamma_multiply(0.85),
+                theme.cursor.gamma_multiply(0.85),
             );
         } else {
             painter.rect_stroke(
                 target,
                 CornerRadius::same(1),
-                Stroke::new(1.0, palette::CURSOR),
+                Stroke::new(1.0, theme.cursor),
                 egui::StrokeKind::Inside,
             );
         }

@@ -4,6 +4,7 @@ use egui::{CornerRadius, Frame, Margin, RichText};
 use ssh_manager_core::{Connection, ConnectionKind};
 
 use super::Action;
+use crate::session::terminal_theme::{self, TerminalTheme};
 use crate::theme::{self, color, radius};
 
 const MAX_VISIBLE_ITEMS: usize = 12;
@@ -15,11 +16,13 @@ enum GlobalAction {
     Toolbox,
     Recordings,
     Settings,
+    Mosaic,
 }
 
 impl GlobalAction {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::NewConnection,
+        Self::Mosaic,
         Self::Toolbox,
         Self::Recordings,
         Self::Settings,
@@ -31,12 +34,14 @@ impl GlobalAction {
             Self::Toolbox => "Ouvrir la boîte à outils",
             Self::Recordings => "Historique des sessions",
             Self::Settings => "Réglages",
+            Self::Mosaic => "Basculer en mosaïque",
         }
     }
 
     fn shortcut(self) -> Option<&'static str> {
         match self {
             Self::NewConnection => Some("Ctrl+N"),
+            Self::Mosaic => Some("Ctrl+M"),
             _ => None,
         }
     }
@@ -47,6 +52,7 @@ impl GlobalAction {
             Self::Toolbox => Action::OpenToolbox,
             Self::Recordings => Action::OpenRecordings,
             Self::Settings => Action::OpenSettings,
+            Self::Mosaic => Action::ToggleMosaic,
         }
     }
 }
@@ -60,6 +66,8 @@ enum Item {
         ssh: bool,
     },
     Global(GlobalAction),
+    /// Index dans `terminal_theme::PRESETS`.
+    Theme(usize),
 }
 
 /// Vrai si chaque mot de la requête apparaît dans l'un des champs.
@@ -98,6 +106,13 @@ fn items(query: &str, connections: &[Connection]) -> Vec<Item> {
             .into_iter()
             .filter(|action| matches(query, &[action.label()]))
             .map(Item::Global),
+    );
+    found.extend(
+        terminal_theme::PRESETS
+            .iter()
+            .enumerate()
+            .filter(|(_, preset)| matches(query, &["thème", "theme", "terminal", preset.label]))
+            .map(|(index, _)| Item::Theme(index)),
     );
     found
 }
@@ -193,6 +208,13 @@ impl CommandPalette {
                 action.label().to_owned(),
                 action.shortcut().unwrap_or("").to_owned(),
             ),
+            Item::Theme(index) => (
+                format!(
+                    "Thème du terminal : {}",
+                    terminal_theme::PRESETS[*index].label
+                ),
+                String::new(),
+            ),
         };
         let fill = if highlighted {
             color::ELEVATED
@@ -206,10 +228,10 @@ impl CommandPalette {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let marker = if matches!(item, Item::Global(_)) {
-                        "›"
-                    } else {
-                        "●"
+                    let marker = match item {
+                        Item::Connection { .. } => "●",
+                        Item::Global(_) => "›",
+                        Item::Theme(_) => "◐",
                     };
                     ui.label(RichText::new(marker).color(color::TEXT_DIM));
                     ui.label(RichText::new(label).font(theme::sans(13.0)));
@@ -233,6 +255,9 @@ fn run(item: &Item, alternate: bool) -> PaletteOutcome {
         Item::Connection { id, ssh: true, .. } if alternate => Action::OpenFiles(id.clone()),
         Item::Connection { id, .. } => Action::Open(id.clone()),
         Item::Global(action) => action.action(),
+        Item::Theme(index) => {
+            Action::SetTerminalTheme(TerminalTheme::from_preset(&terminal_theme::PRESETS[*index]))
+        }
     })
 }
 
@@ -259,5 +284,16 @@ mod tests {
         let found = items("réglages", &[connection]);
         assert!(matches!(found[0], Item::Connection { .. }));
         assert_eq!(found[1], Item::Global(GlobalAction::Settings));
+    }
+
+    #[test]
+    fn should_offer_every_theme_when_searching_for_themes() {
+        let found = items("thème", &[]);
+        let themes = found
+            .iter()
+            .filter(|item| matches!(item, Item::Theme(_)))
+            .count();
+        assert_eq!(themes, terminal_theme::PRESETS.len());
+        assert_eq!(items("dracula", &[]), [Item::Theme(2)]);
     }
 }

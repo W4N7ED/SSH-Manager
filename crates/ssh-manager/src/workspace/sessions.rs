@@ -1,15 +1,19 @@
 //! Onglets de session : terminal SSH ou navigateur de fichiers.
 
+use std::collections::BTreeSet;
+
 use egui::{Color32, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use ssh_manager_core::Connection;
 
+use super::mosaic::{self, Mosaic};
 use super::{Action, Workspace};
 use crate::files::FileBrowser;
 use crate::files::view::{self as files_view, BrowserView};
 use crate::session::emulator::GridSize;
 use crate::session::ssh::{SessionError, SessionState, SshSession, TerminalBuffers};
+use crate::session::terminal_theme::TerminalColors;
 use crate::session::view;
-use crate::settings::PasteMode;
+use crate::settings::{PasteMode, Settings};
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
@@ -30,6 +34,28 @@ pub enum SessionKind {
         browser: FileBrowser,
         view: BrowserView,
     },
+}
+
+/// Préférences d'affichage des terminaux, lues une fois par image.
+#[derive(Clone, Copy)]
+pub struct TerminalPrefs {
+    pub paste_mode: PasteMode,
+    pub colors: TerminalColors,
+}
+
+impl TerminalPrefs {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            paste_mode: settings.paste_mode,
+            colors: settings.terminal_theme.colors(),
+        }
+    }
+}
+
+/// Saisie faite dans une session, à rejouer dans les sessions synchronisées.
+pub struct TypedInput {
+    pub source: u64,
+    pub bytes: Vec<u8>,
 }
 
 pub struct OpenSession {
@@ -66,6 +92,7 @@ impl OpenSession {
 pub enum ActiveTab {
     Home,
     Toolbox,
+    Mosaic,
     Session(u64),
 }
 
@@ -115,6 +142,22 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
                     {
                         workspace.active = ActiveTab::Toolbox;
                     }
+                    if !workspace.mosaic.is_empty() {
+                        let label = format!("▦  Mosaïque · {}", workspace.mosaic.count());
+                        if tab(
+                            ui,
+                            workspace.active == ActiveTab::Mosaic,
+                            None,
+                            &label,
+                            false,
+                        )
+                        .0
+                        .on_hover_text("Sessions côte à côte (Ctrl+M)")
+                        .clicked()
+                        {
+                            workspace.active = ActiveTab::Mosaic;
+                        }
+                    }
                     for session in &workspace.sessions {
                         let state = session.state();
                         let active = workspace.active == ActiveTab::Session(session.id);
@@ -127,9 +170,25 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
                         } else {
                             session.connection.name.clone()
                         };
+                        let synced = workspace.synced.contains(&session.id);
+                        let label = match (workspace.mosaic.contains(session.id), synced) {
+                            (true, true) => format!("{label}  ▦ ⟳"),
+                            (true, false) => format!("{label}  ▦"),
+                            (false, true) => format!("{label}  ⟳"),
+                            (false, false) => label,
+                        };
                         let (response, close) =
                             tab(ui, active, Some(status_color(&state)), &label, true);
-                        response.context_menu(|ui| tab_menu(session, &state, ui, actions));
+                        response.context_menu(|ui| {
+                            tab_menu(
+                                session,
+                                &state,
+                                &workspace.mosaic,
+                                &workspace.synced,
+                                ui,
+                                actions,
+                            )
+                        });
                         if close {
                             actions.push(Action::CloseSession(session.id));
                         } else if response.clicked() {
@@ -142,7 +201,14 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
 }
 
 /// Menu du clic droit sur un onglet de session.
-fn tab_menu(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &mut Vec<Action>) {
+fn tab_menu(
+    session: &OpenSession,
+    state: &SessionState,
+    mosaic: &Mosaic,
+    synced: &BTreeSet<u64>,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
     if ui
         .add_enabled(!state.is_live(), egui::Button::new("Reconnecter"))
         .clicked()
@@ -157,6 +223,48 @@ fn tab_menu(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &
     if session.is_terminal() && ui.button("Exporter la session…").clicked() {
         actions.push(Action::ExportSession(session.id));
         ui.close();
+    }
+    ui.separator();
+    if session.is_terminal() {
+        let label = if synced.contains(&session.id) {
+            "⟳ Désynchroniser la saisie"
+        } else {
+            "⟳ Synchroniser la saisie"
+        };
+        if ui
+            .button(label)
+            .on_hover_text(
+                "Ce qui est tapé dans une session synchronisée est envoyé à toutes les autres",
+            )
+            .clicked()
+        {
+            actions.push(Action::ToggleSync(session.id));
+            ui.close();
+        }
+    }
+    if mosaic.contains(session.id) {
+        if ui.button("Retirer de la mosaïque").clicked() {
+            actions.push(Action::RemoveFromMosaic(session.id));
+            ui.close();
+        }
+    } else {
+        ui.menu_button("Ajouter à la mosaïque", |ui| {
+            for (slot, label) in mosaic::SLOT_LABELS.iter().enumerate() {
+                let occupied = mosaic.slot(slot).is_some();
+                let text = if occupied {
+                    format!("{label} (remplacer)")
+                } else {
+                    (*label).to_owned()
+                };
+                if ui.button(text).clicked() {
+                    actions.push(Action::PlaceInMosaic {
+                        session: session.id,
+                        slot,
+                    });
+                    ui.close();
+                }
+            }
+        });
     }
     ui.separator();
     if ui.button("Fermer").clicked() {
@@ -236,12 +344,13 @@ fn tab(
     (response, close)
 }
 
+/// Affiche une session ; renvoie ce que l'utilisateur y a tapé.
 pub fn session_panel(
     session: &mut OpenSession,
-    paste_mode: PasteMode,
+    prefs: &TerminalPrefs,
     ui: &mut Ui,
     actions: &mut Vec<Action>,
-) {
+) -> Vec<TypedInput> {
     let state = session.state();
     if let SessionState::Failed(error) = &state {
         Frame::new()
@@ -252,7 +361,7 @@ pub fn session_panel(
                 toolbar(session, &state, ui, actions);
                 failure(session, error, ui, actions);
             });
-        return;
+        return Vec::new();
     }
     match &mut session.kind {
         SessionKind::Files { browser, view } => {
@@ -261,8 +370,9 @@ pub fn session_panel(
             } else if files_view::show(ui, browser, view).is_some() {
                 actions.push(Action::CloseSession(session.id));
             }
+            Vec::new()
         }
-        SessionKind::Terminal { .. } => terminal_panel(session, &state, paste_mode, ui, actions),
+        SessionKind::Terminal { .. } => terminal_panel(session, &state, prefs, ui, actions),
     }
 }
 
@@ -287,12 +397,13 @@ fn connecting(ui: &mut Ui, connection: &Connection) {
 fn terminal_panel(
     session: &mut OpenSession,
     state: &SessionState,
-    paste_mode: PasteMode,
+    prefs: &TerminalPrefs,
     ui: &mut Ui,
     actions: &mut Vec<Action>,
-) {
+) -> Vec<TypedInput> {
+    let mut typed = Vec::new();
     Frame::new()
-        .fill(crate::session::palette::BACKGROUND)
+        .fill(prefs.colors.background)
         .stroke(Stroke::new(1.0, color::BORDER_SUBTLE))
         .corner_radius(CornerRadius::same(radius::MEDIUM))
         .show(ui, |ui| {
@@ -303,12 +414,181 @@ fn terminal_panel(
                 disconnected_banner(session.id, reason.as_deref(), ui, actions);
             }
             if let SessionKind::Terminal { ssh, size, .. } = &mut session.kind {
-                let terminal = view::show(ui, ssh, paste_mode, state.is_live());
+                let terminal =
+                    view::show(ui, ssh, prefs.paste_mode, &prefs.colors, state.is_live());
                 *size = terminal.size;
                 if terminal.reconnect_requested {
                     actions.push(Action::Reconnect(session.id));
                 }
+                typed.extend(terminal.typed.into_iter().map(|bytes| TypedInput {
+                    source: session.id,
+                    bytes,
+                }));
             }
+        });
+    typed
+}
+
+/// La mosaïque : quatre quarts, chacun une session ou un emplacement libre.
+pub fn mosaic_panel(
+    sessions: &mut [OpenSession],
+    layout: &Mosaic,
+    synced: &BTreeSet<u64>,
+    prefs: &TerminalPrefs,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) -> Vec<TypedInput> {
+    let synced_tiles = (0..mosaic::SLOT_COUNT)
+        .filter_map(|slot| layout.slot(slot))
+        .filter(|id| synced.contains(id))
+        .count();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Mosaïque").font(theme::sans_bold(15.0)));
+        let badge = if synced_tiles > 1 {
+            format!("SYNC · {synced_tiles} panneaux")
+        } else {
+            format!("{} panneau(x)", layout.count())
+        };
+        let badge_color = if synced_tiles > 1 {
+            color::WARNING
+        } else {
+            color::TEXT_DIM
+        };
+        ui.label(
+            RichText::new(badge)
+                .font(theme::mono(11.0))
+                .color(badge_color),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::secondary_button(ui, "Quitter la mosaïque").clicked() {
+                actions.push(Action::ToggleMosaic);
+            }
+            ui.label(
+                RichText::new("Clic droit sur un onglet pour l'ajouter ou le synchroniser")
+                    .font(theme::sans(12.0))
+                    .color(color::TEXT_DIM),
+            );
+        });
+    });
+    ui.add_space(8.0);
+
+    const GAP: f32 = 8.0;
+    let area = ui.available_rect_before_wrap();
+    let tile_size = Vec2::new((area.width() - GAP) / 2.0, (area.height() - GAP) / 2.0);
+    let mut typed = Vec::new();
+    for slot in 0..mosaic::SLOT_COUNT {
+        let origin = area.min
+            + Vec2::new(
+                (slot % 2) as f32 * (tile_size.x + GAP),
+                (slot / 2) as f32 * (tile_size.y + GAP),
+            );
+        let rect = Rect::from_min_size(origin, tile_size);
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .id_salt(("mosaic-tile", slot)),
+            |ui| {
+                let occupant = layout
+                    .slot(slot)
+                    .and_then(|id| sessions.iter_mut().find(|session| session.id == id));
+                match occupant {
+                    Some(session) => {
+                        tile_header(session, slot, synced.contains(&session.id), ui, actions);
+                        typed.extend(session_panel(session, prefs, ui, actions));
+                    }
+                    None => empty_tile(slot, sessions, layout, ui, actions),
+                }
+            },
+        );
+    }
+    ui.allocate_rect(area, Sense::hover());
+    typed
+}
+
+fn tile_header(
+    session: &OpenSession,
+    slot: usize,
+    synced: bool,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("●")
+                .size(9.0)
+                .color(status_color(&session.state())),
+        );
+        ui.label(RichText::new(&session.connection.name).font(theme::sans_semibold(12.0)));
+        if synced {
+            ui.label(
+                RichText::new("⟳ sync")
+                    .font(theme::mono(10.0))
+                    .color(color::WARNING),
+            );
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let undock =
+                egui::Button::new(RichText::new("⊡").color(color::TEXT_MUTED)).frame(false);
+            if ui
+                .add(undock)
+                .on_hover_text("Retirer de la mosaïque")
+                .clicked()
+            {
+                actions.push(Action::RemoveFromMosaic(session.id));
+            }
+            ui.label(
+                RichText::new((slot + 1).to_string())
+                    .font(theme::mono(10.0))
+                    .color(color::TEXT_DIM),
+            );
+        });
+    });
+}
+
+fn empty_tile(
+    slot: usize,
+    sessions: &[OpenSession],
+    layout: &Mosaic,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
+    Frame::new()
+        .stroke(Stroke::new(1.0, color::BORDER_SUBTLE))
+        .corner_radius(CornerRadius::same(radius::MEDIUM))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() / 2.0 - 40.0);
+                ui.label(RichText::new("+").size(22.0).color(color::TEXT_DIM));
+                ui.label(RichText::new(mosaic::SLOT_LABELS[slot]).color(color::TEXT_MUTED));
+                let candidates: Vec<&OpenSession> = sessions
+                    .iter()
+                    .filter(|session| !layout.contains(session.id))
+                    .collect();
+                if candidates.is_empty() {
+                    ui.label(
+                        RichText::new("Ouvrez une autre session pour la placer ici")
+                            .font(theme::sans(12.0))
+                            .color(color::TEXT_DIM),
+                    );
+                    return;
+                }
+                egui::ComboBox::from_id_salt(("mosaic-pick", slot))
+                    .selected_text("Choisir une session…")
+                    .show_ui(ui, |ui| {
+                        for session in candidates {
+                            if ui
+                                .selectable_label(false, &session.connection.name)
+                                .clicked()
+                            {
+                                actions.push(Action::PlaceInMosaic {
+                                    session: session.id,
+                                    slot,
+                                });
+                            }
+                        }
+                    });
+            });
         });
 }
 
@@ -344,6 +624,13 @@ fn disconnected_banner(id: u64, reason: Option<&str>, ui: &mut Ui, actions: &mut
 
 fn toolbar(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &mut Vec<Action>) {
     Frame::new()
+        .fill(color::SURFACE)
+        .corner_radius(CornerRadius {
+            nw: radius::MEDIUM,
+            ne: radius::MEDIUM,
+            sw: 0,
+            se: 0,
+        })
         .inner_margin(Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {

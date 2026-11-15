@@ -1,12 +1,11 @@
-//! Couleurs du terminal : thème « Minuit » et résolution des couleurs ANSI.
+//! Couleurs du terminal : résolution des couleurs ANSI selon le thème choisi.
 
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use egui::Color32;
 
-pub const BACKGROUND: Color32 = Color32::from_rgb(0x0e, 0x0b, 0x16);
-pub const FOREGROUND: Color32 = Color32::from_rgb(0xd9, 0xd4, 0xe8);
-pub const CURSOR: Color32 = Color32::from_rgb(0x9a, 0x6b, 0xff);
+use super::terminal_theme::TerminalColors;
+
 pub const SELECTION: Color32 = Color32::from_rgba_premultiplied(55, 38, 92, 140);
 
 /// Les 16 couleurs ANSI, accordées à la direction Minuit.
@@ -53,12 +52,12 @@ fn dim(color: Color32) -> Color32 {
     )
 }
 
-fn named(color: NamedColor) -> Color32 {
+fn named(color: NamedColor, theme: &TerminalColors) -> Color32 {
     match color {
-        NamedColor::Foreground | NamedColor::BrightForeground => FOREGROUND,
-        NamedColor::Background => BACKGROUND,
-        NamedColor::Cursor => CURSOR,
-        NamedColor::DimForeground => dim(FOREGROUND),
+        NamedColor::Foreground | NamedColor::BrightForeground => theme.foreground,
+        NamedColor::Background => theme.background,
+        NamedColor::Cursor => theme.cursor,
+        NamedColor::DimForeground => dim(theme.foreground),
         other => {
             let index = other as usize;
             if index < 16 {
@@ -70,16 +69,21 @@ fn named(color: NamedColor) -> Color32 {
     }
 }
 
-fn resolve(color: Color) -> Color32 {
+fn resolve(color: Color, theme: &TerminalColors) -> Color32 {
     match color {
-        Color::Named(name) => named(name),
+        Color::Named(name) => named(name, theme),
         Color::Spec(rgb) => Color32::from_rgb(rgb.r, rgb.g, rgb.b),
         Color::Indexed(index) => xterm_256(index),
     }
 }
 
 /// Couleurs effectives d'une cellule, attributs (gras, atténué, inversé) appliqués.
-pub fn cell_colors(fg: Color, bg: Color, flags: Flags) -> (Color32, Color32) {
+pub fn cell_colors(
+    fg: Color,
+    bg: Color,
+    flags: Flags,
+    theme: &TerminalColors,
+) -> (Color32, Color32) {
     // Comme la plupart des terminaux : le gras éclaircit les 8 couleurs de base.
     let fg = match fg {
         Color::Named(name) if flags.contains(Flags::BOLD) && (name as usize) < 8 => {
@@ -87,8 +91,8 @@ pub fn cell_colors(fg: Color, bg: Color, flags: Flags) -> (Color32, Color32) {
         }
         other => other,
     };
-    let mut foreground = resolve(fg);
-    let mut background = resolve(bg);
+    let mut foreground = resolve(fg, theme);
+    let mut background = resolve(bg, theme);
     if flags.contains(Flags::DIM) {
         foreground = dim(foreground);
     }
@@ -104,6 +108,7 @@ pub fn cell_colors(fg: Color, bg: Color, flags: Flags) -> (Color32, Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::terminal_theme::MINUIT;
 
     #[test]
     fn should_map_the_cube_corners() {
@@ -123,8 +128,9 @@ mod tests {
             Color::Named(NamedColor::Foreground),
             Color::Named(NamedColor::Background),
             Flags::INVERSE,
+            &MINUIT,
         );
-        assert_eq!((fg, bg), (BACKGROUND, FOREGROUND));
+        assert_eq!((fg, bg), (MINUIT.background, MINUIT.foreground));
     }
 
     #[test]
@@ -133,6 +139,7 @@ mod tests {
             Color::Named(NamedColor::Red),
             Color::Named(NamedColor::Background),
             Flags::BOLD,
+            &MINUIT,
         );
         assert_eq!(fg, ANSI[9]);
     }
@@ -144,6 +151,7 @@ mod tests {
             Color::Spec(rgb),
             Color::Named(NamedColor::Background),
             Flags::empty(),
+            &MINUIT,
         );
         assert_eq!(fg, Color32::from_rgb(1, 2, 3));
     }
