@@ -102,13 +102,18 @@ fn search_field(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut workspace.search)
                         .id(egui::Id::unique(SEARCH_FIELD_ID))
+                        // Même police que la saisie : sinon l'indication, plus haute
+                        // ou plus basse, n'est plus centrée dans la pastille.
                         .hint_text(
                             RichText::new("Rechercher, ou user@hôte:port pour se connecter")
+                                .font(theme::mono(12.0))
                                 .color(color::TEXT_DIM),
                         )
                         .frame(egui::Frame::NONE)
                         .font(theme::mono(13.0))
-                        .desired_width(360.0),
+                        .min_size(egui::vec2(0.0, 32.0))
+                        .align(egui::Align2::LEFT_CENTER)
+                        .desired_width(380.0),
                 );
                 if let Some(connection) = quick_target(workspace) {
                     let submitted =
