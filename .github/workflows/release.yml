@@ -34,7 +34,11 @@ jobs:
             throw "Le tag ${{ github.ref_name }} ne correspond pas à la version $version de Cargo.toml"
           }
 
-      - name: Livrables (NSIS est présent sur les images Windows de GitHub)
+      # NSIS n'est plus préinstallé sur les images Windows de GitHub.
+      - name: NSIS
+        run: choco install nsis --no-progress -y
+
+      - name: Livrables
         shell: pwsh
         run: ./scripts/build-release.ps1
 
