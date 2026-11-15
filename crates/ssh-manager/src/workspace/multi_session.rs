@@ -3,6 +3,32 @@
 use super::*;
 
 impl Workspace {
+    /// Relance les terminaux coupés dont le compte à rebours est écoulé, et
+    /// réveille l'interface pour faire défiler celui des autres.
+    pub(super) fn drive_auto_reconnect(&mut self, ctx: &egui::Context) {
+        if !self.settings.auto_reconnect {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        for session in self
+            .sessions
+            .iter_mut()
+            .filter(|session| session.is_terminal())
+        {
+            let state = session.state();
+            if session.auto_reconnect.tick(&state, now) {
+                tracing::info!(target = %session.connection.target(), attempt = session.auto_reconnect.attempts, "automatic reconnection");
+                due.push(session.id);
+            } else if session.auto_reconnect.due.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        }
+        for id in due {
+            self.restart_in_place(id, None);
+        }
+    }
+
     /// Rejoue dans les autres sessions synchronisées ce qui a été tapé dans
     /// l'une d'elles. Seules les sessions connectées reçoivent la saisie.
     pub(super) fn replay_synced_input(&self, typed: Vec<TypedInput>) {

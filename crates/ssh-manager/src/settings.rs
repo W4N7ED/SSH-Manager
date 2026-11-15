@@ -40,6 +40,8 @@ pub struct Settings {
     pub terminal_theme: TerminalTheme,
     /// Taille du texte des terminaux, en points.
     pub terminal_font_size: f32,
+    /// Reconnecte un terminal coupé (réseau, délai, veille), jamais après « exit ».
+    pub auto_reconnect: bool,
 }
 
 impl Default for Settings {
@@ -51,6 +53,7 @@ impl Default for Settings {
             clipboard_clear_seconds: 30,
             terminal_theme: TerminalTheme::default(),
             terminal_font_size: 14.0,
+            auto_reconnect: true,
         }
     }
 }
@@ -119,6 +122,7 @@ mod tests {
                 TerminalTheme::preset("nord").expect("thème Nord présent"),
             ),
             terminal_font_size: 16.0,
+            auto_reconnect: false,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);

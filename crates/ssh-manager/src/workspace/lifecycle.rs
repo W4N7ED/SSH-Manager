@@ -2,6 +2,7 @@
 //! reconnexion dans le même onglet, fermeture, et clés d'hôte.
 
 use super::*;
+use auto_reconnect::AutoReconnect;
 
 impl Workspace {
     /// Épingle dans le coffre les clés d'hôte découvertes à la première connexion.
@@ -106,6 +107,7 @@ impl Workspace {
             id,
             connection,
             kind,
+            auto_reconnect: AutoReconnect::default(),
         });
         self.active = ActiveTab::Session(id);
     }

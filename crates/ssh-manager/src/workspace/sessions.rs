@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use egui::{Color32, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use ssh_manager_core::Connection;
 
+use super::auto_reconnect::{self, AutoReconnect, AutoReconnectStatus};
 use super::mosaic::{self, Mosaic};
 use super::search_bar::{self, SearchBar};
 use super::{Action, Workspace};
@@ -47,6 +48,7 @@ pub struct OpenSession {
     pub id: u64,
     pub connection: Connection,
     pub kind: SessionKind,
+    pub auto_reconnect: AutoReconnect,
 }
 
 impl OpenSession {
@@ -337,7 +339,13 @@ pub fn session_panel(
     actions: &mut Vec<Action>,
 ) -> Vec<TypedInput> {
     let state = session.state();
-    if let SessionState::Failed(error) = &state {
+    // Pendant la reconnexion automatique, un serveur encore injoignable ne
+    // remplace pas l'écran : le bandeau indique la prochaine tentative.
+    let retrying = session.is_terminal()
+        && auto_reconnect::should_retry(&state, session.auto_reconnect.attempts);
+    if let SessionState::Failed(error) = &state
+        && !retrying
+    {
         Frame::new()
             .fill(color::SURFACE)
             .corner_radius(CornerRadius::same(radius::MEDIUM))
@@ -395,8 +403,18 @@ fn terminal_panel(
             ui.set_min_size(ui.available_size());
             toolbar(session, state, ui, actions);
             ui.add(egui::Separator::default().spacing(0.0));
-            if let SessionState::Closed { reason } = state {
-                disconnected_banner(session.id, reason.as_deref(), ui, actions);
+            let ended = match state {
+                SessionState::Closed { reason, .. } => {
+                    Some(reason.clone().unwrap_or_else(|| "déconnecté".into()))
+                }
+                SessionState::Failed(error) => Some(format!("reconnexion impossible : {error}")),
+                _ => None,
+            };
+            if let Some(reason) = ended {
+                let auto = session
+                    .auto_reconnect
+                    .status(state, std::time::Instant::now());
+                disconnected_banner(session.id, &reason, auto, ui, actions);
             }
             if let SessionKind::Terminal {
                 ssh, size, search, ..
@@ -591,8 +609,31 @@ fn empty_tile(
         });
 }
 
+/// Ce que dit le bandeau de la reconnexion automatique.
+fn auto_reconnect_text(auto: Option<AutoReconnectStatus>) -> String {
+    match auto {
+        Some(AutoReconnectStatus::Scheduled {
+            seconds_left,
+            attempt,
+        }) => format!(
+            "Reconnexion automatique dans {seconds_left} s (tentative {attempt}/{}).",
+            auto_reconnect::MAX_ATTEMPTS
+        ),
+        Some(AutoReconnectStatus::GaveUp) => {
+            "Reconnexion automatique abandonnée. Appuyez sur Entrée pour réessayer.".into()
+        }
+        None => "Appuyez sur Entrée pour vous reconnecter.".into(),
+    }
+}
+
 /// Bandeau d'une session terminée : la raison et le moyen de reprendre.
-fn disconnected_banner(id: u64, reason: Option<&str>, ui: &mut Ui, actions: &mut Vec<Action>) {
+fn disconnected_banner(
+    id: u64,
+    reason: &str,
+    auto: Option<AutoReconnectStatus>,
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+) {
     Frame::new()
         .fill(color::tint(color::WARNING, 28))
         .inner_margin(Margin::symmetric(14, 8))
@@ -601,20 +642,22 @@ fn disconnected_banner(id: u64, reason: Option<&str>, ui: &mut Ui, actions: &mut
             ui.horizontal(|ui| {
                 ui.label(RichText::new("●").size(9.0).color(color::WARNING));
                 ui.label(
-                    RichText::new(format!(
-                        "Session terminée — {}",
-                        reason.unwrap_or("déconnecté")
-                    ))
-                    .font(theme::sans_semibold(13.0)),
+                    RichText::new(format!("Session terminée — {reason}"))
+                        .font(theme::sans_semibold(13.0)),
                 );
                 ui.label(
-                    RichText::new("Appuyez sur Entrée pour vous reconnecter.")
+                    RichText::new(auto_reconnect_text(auto))
                         .font(theme::sans(12.0))
                         .color(color::TEXT_MUTED),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::primary_button(ui, "Reconnecter").clicked() {
                         actions.push(Action::Reconnect(id));
+                    }
+                    if matches!(auto, Some(AutoReconnectStatus::Scheduled { .. }))
+                        && widgets::secondary_button(ui, "Annuler").clicked()
+                    {
+                        actions.push(Action::CancelAutoReconnect(id));
                     }
                 });
             });
@@ -642,7 +685,7 @@ fn toolbar(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &m
                         }
                         SessionKind::Files { .. } => "connecté".to_owned(),
                     },
-                    SessionState::Closed { reason } => {
+                    SessionState::Closed { reason, .. } => {
                         reason.clone().unwrap_or_else(|| "déconnecté".into())
                     }
                     SessionState::Failed(_) => "échec".to_owned(),

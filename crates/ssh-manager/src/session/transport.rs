@@ -37,6 +37,9 @@ pub enum SessionState {
     /// Session terminée normalement ; `reason` décrit la fin si elle est connue.
     Closed {
         reason: Option<String>,
+        /// Vrai si la connexion a été coupée (réseau, délai, veille), et non
+        /// fermée volontairement : seul ce cas justifie une reconnexion automatique.
+        connection_lost: bool,
     },
     Failed(SessionError),
 }

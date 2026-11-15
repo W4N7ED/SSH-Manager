@@ -60,6 +60,8 @@ pub enum Action {
     CloseSession(u64),
     Reconnect(u64),
     DuplicateSession(u64),
+    /// Arrête les tentatives de reconnexion automatique d'une session.
+    CancelAutoReconnect(u64),
     ExportSession(u64),
     RetryWithPassword(u64),
     /// La clé privée est chiffrée : redemander sa phrase de passe.

@@ -15,6 +15,28 @@ use crate::recordings::Recorder;
 
 const TERMINAL_TYPE: &str = "xterm-256color";
 
+/// Fin d'une session ouverte.
+struct SessionEnd {
+    reason: String,
+    connection_lost: bool,
+}
+
+impl SessionEnd {
+    fn closed(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            connection_lost: false,
+        }
+    }
+
+    fn lost(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            connection_lost: true,
+        }
+    }
+}
+
 /// Ce qui survit aux reconnexions d'un onglet : l'écran avec son historique,
 /// et l'enregistrement de la session.
 #[derive(Clone)]
@@ -124,11 +146,13 @@ impl Task {
             .connect_and_relay(&connection, pinned, size, input, responses)
             .await
         {
-            Ok(reason) => {
-                tracing::info!(%target, %reason, "ssh session closed");
+            Ok(end) => {
+                let reason = end.reason;
+                tracing::info!(%target, %reason, connection_lost = end.connection_lost, "ssh session closed");
                 lock(&self.buffers.recorder).note(&format!("session terminée : {reason}"));
                 self.status.set(SessionState::Closed {
                     reason: Some(reason),
+                    connection_lost: end.connection_lost,
                 });
             }
             Err(error) => {
@@ -148,7 +172,7 @@ impl Task {
         size: GridSize,
         input: UnboundedReceiver<Input>,
         responses: UnboundedReceiver<Vec<u8>>,
-    ) -> Result<String, SessionError> {
+    ) -> Result<SessionEnd, SessionError> {
         let handle = transport::open(connection, pinned, &self.status).await?;
         let channel = handle.channel_open_session().await.map_err(network)?;
         channel
@@ -166,12 +190,12 @@ impl Task {
         channel.request_shell(false).await.map_err(network)?;
         self.status.set(SessionState::Connected);
 
-        let reason = self.relay(channel, input, responses).await;
+        let end = self.relay(channel, input, responses).await;
         // Le serveur a pu fermer de lui-même : un échec de la déconnexion est sans conséquence.
         if let Err(error) = handle.disconnect(Disconnect::ByApplication, "", "fr").await {
             tracing::debug!(%error, "SSH disconnect after terminal session failed");
         }
-        Ok(reason)
+        Ok(end)
     }
 
     /// Relaie les octets jusqu'à la fin de la session. Renvoie la raison de fin.
@@ -180,7 +204,7 @@ impl Task {
         channel: russh::Channel<client::Msg>,
         mut input: UnboundedReceiver<Input>,
         mut responses: UnboundedReceiver<Vec<u8>>,
-    ) -> String {
+    ) -> SessionEnd {
         let (mut reader, writer) = channel.split();
         loop {
             let written = tokio::select! {
@@ -190,14 +214,16 @@ impl Task {
                         Ok(())
                     }
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        return format!("le shell s'est terminé (code {exit_status})");
+                        return SessionEnd::closed(format!("le shell s'est terminé (code {exit_status})"));
                     }
                     Some(ChannelMsg::Eof | ChannelMsg::Close) => {
-                        return "le serveur a fermé la session".into();
+                        // Sans code de sortie : le serveur a coupé (délai d'inactivité côté
+                        // serveur, redémarrage…), ce n'est pas l'utilisateur qui est parti.
+                        return SessionEnd::lost("le serveur a fermé la session");
                     }
                     // Plus aucun message : la connexion a été coupée (délai d'inactivité,
                     // keepalive sans réponse, mise en veille du poste…).
-                    None => return "connexion perdue".into(),
+                    None => return SessionEnd::lost("connexion perdue"),
                     Some(_) => Ok(()),
                 },
                 command = input.recv() => match command {
@@ -207,12 +233,12 @@ impl Task {
                             .window_change(u32::from(size.columns), u32::from(size.rows), 0, 0)
                             .await
                     }
-                    Some(Input::Close) | None => return "session fermée".into(),
+                    Some(Input::Close) | None => return SessionEnd::closed("session fermée"),
                 },
                 Some(response) = responses.recv() => writer.data(&response[..]).await,
             };
             if let Err(error) = written {
-                return format!("connexion perdue ({error})");
+                return SessionEnd::lost(format!("connexion perdue ({error})"));
             }
         }
     }

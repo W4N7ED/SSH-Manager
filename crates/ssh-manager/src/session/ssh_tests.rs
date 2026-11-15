@@ -100,6 +100,11 @@ impl server::Handler for EchoShell {
             session.exit_status_request(channel, 0)?;
             return session.close(channel);
         }
+        // « drop » : le serveur coupe sans code de sortie, comme à l'expiration
+        // d'un délai d'inactivité.
+        if data == b"drop\r" {
+            return session.close(channel);
+        }
         session.data(channel, data.to_vec())
     }
 
@@ -249,7 +254,14 @@ fn should_keep_the_screen_after_the_shell_ends_and_reconnect_into_it() {
         matches!(first.state(), SessionState::Closed { .. })
     });
     match first.state() {
-        SessionState::Closed { reason } => {
+        SessionState::Closed {
+            reason,
+            connection_lost,
+        } => {
+            assert!(
+                !connection_lost,
+                "une sortie du shell n'est pas une coupure"
+            );
             assert!(reason.unwrap().contains("code 0"), "raison de fin attendue");
         }
         other => panic!("fermeture attendue, obtenu : {other:?}"),
@@ -273,6 +285,29 @@ fn should_keep_the_screen_after_the_shell_ends_and_reconnect_into_it() {
         screen_contains(&second, "avant-coupure"),
         "l'écran d'avant la coupure est conservé"
     );
+}
+
+#[test]
+fn should_flag_a_server_side_cut_as_a_lost_connection() {
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    let session = start_terminal(
+        &runtime,
+        connection(server.port, PASSWORD),
+        server.fingerprint.clone(),
+    );
+    wait_until("message d'accueil", || screen_contains(&session, "welcome"));
+    session.send(b"drop\r".to_vec());
+    wait_until("session terminée", || {
+        matches!(session.state(), SessionState::Closed { .. })
+    });
+    assert!(matches!(
+        session.state(),
+        SessionState::Closed {
+            connection_lost: true,
+            ..
+        }
+    ));
 }
 
 #[test]

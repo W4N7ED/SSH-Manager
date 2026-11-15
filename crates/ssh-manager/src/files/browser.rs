@@ -199,7 +199,10 @@ impl Worker {
         }
         backend.close().await;
         tracing::info!(%target, "file session closed");
-        self.status.set(SessionState::Closed { reason: None });
+        self.status.set(SessionState::Closed {
+            reason: None,
+            connection_lost: false,
+        });
     }
 
     fn current_path(&self) -> String {

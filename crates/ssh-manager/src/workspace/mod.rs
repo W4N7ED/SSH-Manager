@@ -1,6 +1,7 @@
 //! L'espace de travail : tout ce qui s'affiche une fois le coffre ouvert.
 
 mod action;
+mod auto_reconnect;
 mod backup_dialogs;
 mod backup_flow;
 mod command_palette;
@@ -157,6 +158,7 @@ impl Workspace {
         let mut actions = Vec::new();
         self.pin_learned_host_keys();
         self.clipboard.tick(ui.ctx());
+        self.drive_auto_reconnect(ui.ctx());
         self.global_shortcuts(ui.ctx(), &mut actions);
 
         top_bar::show(self, ui, &mut actions);
@@ -369,6 +371,11 @@ impl Workspace {
             Action::CloseSession(id) => self.close_session(id),
             Action::Reconnect(id) => self.restart_in_place(id, None),
             Action::DuplicateSession(id) => self.duplicate_session(id),
+            Action::CancelAutoReconnect(id) => {
+                if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                    session.auto_reconnect.give_up();
+                }
+            }
             Action::ExportSession(id) => self.export_session(id),
             Action::RetryWithPassword(id) => self.reconnect_asking(id, SecretKind::Password),
             Action::RetryWithKeyPassphrase { session, wrong } => {

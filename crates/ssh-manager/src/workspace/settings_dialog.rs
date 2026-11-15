@@ -34,6 +34,8 @@ pub fn show(ctx: &egui::Context, settings: &mut Settings, actions: &mut Vec<Acti
                     ui.add_space(18.0);
                     theme_section(ui, settings);
                     ui.add_space(18.0);
+                    reconnect_section(ui, settings);
+                    ui.add_space(18.0);
                     recording_section(ui, settings);
                     ui.add_space(18.0);
                     backup_section(ui, actions);
@@ -88,6 +90,20 @@ fn theme_section(ui: &mut egui::Ui, settings: &mut Settings) {
     );
     ui.add_space(4.0);
     theme_picker(ui, &mut settings.terminal_theme);
+}
+
+fn reconnect_section(ui: &mut egui::Ui, settings: &mut Settings) {
+    widgets::micro_label(ui, "Terminal — reconnexion");
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut settings.auto_reconnect,
+        RichText::new("Reconnecter automatiquement après une coupure").font(theme::sans(13.0)),
+    );
+    ui.label(
+        RichText::new("Après une coupure réseau, un délai d'inactivité ou une mise en veille : jusqu'à 5 tentatives espacées (3 s à 1 min). Jamais après un « exit » volontaire.")
+            .font(theme::sans(12.0))
+            .color(color::TEXT_DIM),
+    );
 }
 
 fn recording_section(ui: &mut egui::Ui, settings: &mut Settings) {
