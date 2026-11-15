@@ -4,6 +4,22 @@
 use super::*;
 
 impl Workspace {
+    /// Applique la durée de conservation choisie (au démarrage et à la
+    /// fermeture des réglages). Les sessions ouvertes ne sont jamais touchées.
+    pub(super) fn purge_expired_recordings(&mut self) {
+        let Some(days) = self.settings.recordings_retention_days else {
+            return;
+        };
+        let max_age = std::time::Duration::from_secs(u64::from(days) * 86_400);
+        let live = self.live_recordings();
+        recordings::purge_older_than(
+            &ssh_manager_vault::paths::recordings_dir(),
+            max_age,
+            std::time::SystemTime::now(),
+            &live,
+        );
+    }
+
     pub(super) fn export_session(&mut self, id: u64) {
         let Some(session) = self.sessions.iter().find(|session| session.id == id) else {
             return;

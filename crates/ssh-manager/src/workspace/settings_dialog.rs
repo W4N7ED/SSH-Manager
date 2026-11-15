@@ -106,6 +106,25 @@ fn reconnect_section(ui: &mut egui::Ui, settings: &mut Settings) {
     );
 }
 
+fn retention_picker(ui: &mut egui::Ui, settings: &mut Settings) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Conserver les enregistrements :").font(theme::sans(12.0)));
+        egui::ComboBox::from_id_salt("recordings-retention")
+            .selected_text(crate::recordings::retention_label(
+                settings.recordings_retention_days,
+            ))
+            .show_ui(ui, |ui| {
+                for option in crate::recordings::RETENTION_OPTIONS {
+                    ui.selectable_value(
+                        &mut settings.recordings_retention_days,
+                        option,
+                        crate::recordings::retention_label(option),
+                    );
+                }
+            });
+    });
+}
+
 fn recording_section(ui: &mut egui::Ui, settings: &mut Settings) {
     widgets::micro_label(ui, "Terminal — enregistrement");
     ui.add_space(4.0);
@@ -118,6 +137,8 @@ fn recording_section(ui: &mut egui::Ui, settings: &mut Settings) {
             .font(theme::sans(12.0))
             .color(color::TEXT_DIM),
     );
+    ui.add_space(4.0);
+    retention_picker(ui, settings);
 }
 
 fn backup_section(ui: &mut egui::Ui, actions: &mut Vec<Action>) {

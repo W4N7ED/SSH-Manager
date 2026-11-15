@@ -135,6 +135,7 @@ impl Workspace {
         if let Some(text) = notice {
             workspace.notify(text, true);
         }
+        workspace.purge_expired_recordings();
         workspace
     }
 
@@ -250,6 +251,7 @@ impl Workspace {
         if self.settings_open && settings_dialog::show(ui.ctx(), &mut self.settings, actions) {
             self.settings_open = false;
             self.save_settings();
+            self.purge_expired_recordings();
         }
     }
 

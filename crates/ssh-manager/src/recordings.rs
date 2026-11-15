@@ -203,6 +203,60 @@ pub fn list(directory: &Path, key: &[u8; 32]) -> Vec<RecordingSummary> {
     recordings
 }
 
+/// Durées de conservation proposées, en jours (`None` : toujours).
+pub const RETENTION_OPTIONS: [Option<u32>; 4] = [None, Some(30), Some(90), Some(365)];
+
+pub fn retention_label(days: Option<u32>) -> String {
+    match days {
+        None => "Toujours".into(),
+        Some(365) => "1 an".into(),
+        Some(days) => format!("{days} jours"),
+    }
+}
+
+/// Supprime les enregistrements écrits pour la dernière fois il y a plus de
+/// `max_age`, sauf ceux des sessions encore ouvertes (`keep`). L'âge est pris
+/// sur la date de modification : inutile de déchiffrer pour trier.
+/// Renvoie le nombre de fichiers supprimés.
+pub fn purge_older_than(
+    directory: &Path,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+    keep: &[PathBuf],
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        let is_recording = path
+            .extension()
+            .is_some_and(|extension| extension == EXTENSION);
+        let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified());
+        let expired = modified
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
+        if !is_recording || !expired || keep.contains(&path) {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "expired session recording could not be removed")
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            removed,
+            max_age_days = max_age.as_secs() / 86_400,
+            "expired session recordings removed"
+        );
+    }
+    removed
+}
+
 /// Date locale lisible, « 2026-11-15 14:03 ».
 pub fn format_date(seconds: i64) -> String {
     chrono::DateTime::from_timestamp(seconds, 0)
@@ -367,6 +421,31 @@ mod tests {
         recorder.feed(b"secret\r\n");
         assert!(recorder.path().is_none());
         assert_eq!(recorder.pending_line(), "", "rien n'est même analysé");
+    }
+
+    #[test]
+    fn should_purge_only_expired_recordings_of_closed_sessions() {
+        let directory = temp_dir("purge");
+        let day = std::time::Duration::from_secs(86_400);
+        let now = std::time::SystemTime::now();
+        let write = |name: &str, age_days: u64| {
+            let path = directory.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(now - day * age_days as u32).unwrap();
+            path
+        };
+        let old = write("old.smlog", 40);
+        let recent = write("recent.smlog", 5);
+        let live = write("live.smlog", 40);
+        let other = write("notes.txt", 400);
+
+        let removed = purge_older_than(&directory, day * 30, now, std::slice::from_ref(&live));
+
+        assert_eq!(removed, 1);
+        assert!(!old.exists());
+        assert!(recent.exists() && live.exists() && other.exists());
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
