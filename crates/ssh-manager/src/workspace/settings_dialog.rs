@@ -2,13 +2,14 @@
 
 use egui::{CornerRadius, Frame, Margin, RichText};
 
+use super::Action;
 use crate::settings::{PasteMode, Settings};
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
 /// Affiche les réglages ; renvoie vrai quand la fenêtre est fermée. Chaque
 /// changement s'applique immédiatement, l'enregistrement se fait à la fermeture.
-pub fn show(ctx: &egui::Context, settings: &mut Settings) -> bool {
+pub fn show(ctx: &egui::Context, settings: &mut Settings, actions: &mut Vec<Action>) -> bool {
     let mut closed = false;
     let modal = egui::Modal::new(egui::Id::unique("settings-dialog"))
         .backdrop_color(color::tint(egui::Color32::BLACK, 150))
@@ -52,6 +53,32 @@ pub fn show(ctx: &egui::Context, settings: &mut Settings) -> bool {
             );
             ui.label(
                 RichText::new("Le texte est chiffré avec la clé du coffre. Retrouvez les sessions dans « Historique » pour les exporter en .txt. Les saisies non affichées (mots de passe) ne sont jamais enregistrées.")
+                    .font(theme::sans(12.0))
+                    .color(color::TEXT_DIM),
+            );
+
+            ui.add_space(18.0);
+            widgets::micro_label(ui, "Sauvegarde");
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if widgets::secondary_button(ui, "Exporter (.enc chiffré)").clicked() {
+                    actions.push(Action::ExportBackup { plain: false });
+                }
+                if widgets::secondary_button(ui, "Importer…").clicked() {
+                    actions.push(Action::ImportBackup);
+                }
+                let plain = egui::Button::new(
+                    RichText::new("Exporter en clair (.json)")
+                        .font(theme::sans(12.0))
+                        .color(color::TEXT_MUTED),
+                )
+                .frame(false);
+                if ui.add(plain).clicked() {
+                    actions.push(Action::ExportBackup { plain: true });
+                }
+            });
+            ui.label(
+                RichText::new("La sauvegarde chiffrée se restaure sur n'importe quel poste avec la phrase de 12 mots. Les sauvegardes de l'ancienne application s'importent aussi.")
                     .font(theme::sans(12.0))
                     .color(color::TEXT_DIM),
             );

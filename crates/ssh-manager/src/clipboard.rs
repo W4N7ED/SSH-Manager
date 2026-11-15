@@ -184,9 +184,15 @@ mod tests {
 
         write_private("secret-de-test-é").unwrap();
         assert_eq!(read_text().as_deref(), Some("secret-de-test-é"));
-        assert!(PRIVACY_MARKERS.iter().all(|marker| has_format(marker)), "marqueurs Win+V présents");
+        assert!(
+            PRIVACY_MARKERS.iter().all(|marker| has_format(marker)),
+            "marqueurs Win+V présents"
+        );
 
-        assert!(!clear_if_unchanged("autre chose").unwrap(), "une autre valeur n'est pas effacée");
+        assert!(
+            !clear_if_unchanged("autre chose").unwrap(),
+            "une autre valeur n'est pas effacée"
+        );
         assert!(clear_if_unchanged("secret-de-test-é").unwrap());
         assert_eq!(read_text(), None);
 

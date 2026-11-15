@@ -1,5 +1,6 @@
 //! L'espace de travail : tout ce qui s'affiche une fois le coffre ouvert.
 
+mod backup_dialogs;
 mod command_palette;
 mod form;
 mod inspector;
@@ -29,12 +30,14 @@ use crate::session::ssh::{SshSession, TerminalBuffers, lock};
 use crate::settings::Settings;
 use crate::theme::{self, color, radius};
 
+use backup_dialogs::{PhraseOutcome, PhrasePrompt};
 use command_palette::{CommandPalette, PaletteOutcome};
 pub use form::ConnectionForm;
 pub use list::SortState;
 use password_prompt::{PasswordPrompt, PromptResult};
 use recordings_dialog::{RecordingsChoice, RecordingsDialog};
 use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind};
+use ssh_manager_vault::backup::{self, Backup};
 
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
 /// Ligne grisée insérée dans le terminal à chaque reconnexion.
@@ -68,6 +71,11 @@ pub enum Action {
     OpenSettings,
     OpenRecordings,
     OpenToolbox,
+    /// Exporte toute la bibliothèque : `.enc` chiffré, ou `.json` en clair.
+    ExportBackup {
+        plain: bool,
+    },
+    ImportBackup,
     NewConnection {
         group: Option<String>,
     },
@@ -123,6 +131,8 @@ pub struct Workspace {
     clipboard: SecureClipboard,
     toolbox: toolbox::Toolbox,
     palette: Option<CommandPalette>,
+    backup_phrase: Option<PhrasePrompt>,
+    confirm_plain_export: bool,
     /// Onglet à relancer en place une fois le mot de passe saisi.
     reconnect_after_prompt: Option<u64>,
 }
@@ -160,6 +170,8 @@ impl Workspace {
             clipboard: SecureClipboard::default(),
             toolbox: toolbox::Toolbox::default(),
             palette: None,
+            backup_phrase: None,
+            confirm_plain_export: false,
             reconnect_after_prompt: None,
         };
         if let Some(text) = notice {
@@ -298,6 +310,7 @@ impl Workspace {
             }
         }
         self.recordings_modal(ui.ctx());
+        self.backup_modals(ui.ctx());
         if let Some(palette) = &mut self.palette {
             match palette.show(ui.ctx(), &self.data.library.connections) {
                 Some(PaletteOutcome::Run(action)) => {
@@ -308,7 +321,7 @@ impl Workspace {
                 None => {}
             }
         }
-        if self.settings_open && settings_dialog::show(ui.ctx(), &mut self.settings) {
+        if self.settings_open && settings_dialog::show(ui.ctx(), &mut self.settings, actions) {
             self.settings_open = false;
             self.save_settings();
         }
@@ -378,6 +391,9 @@ impl Workspace {
             Action::OpenSettings => self.settings_open = true,
             Action::OpenRecordings => self.open_recordings(),
             Action::OpenToolbox => self.active = ActiveTab::Toolbox,
+            Action::ExportBackup { plain: false } => self.export_backup(false),
+            Action::ExportBackup { plain: true } => self.confirm_plain_export = true,
+            Action::ImportBackup => self.import_backup(),
             Action::CloseSession(id) => self.close_session(id),
             Action::Reconnect(id) => self.reconnect(id, false),
             Action::DuplicateSession(id) => self.duplicate_session(id),
@@ -671,6 +687,106 @@ impl Workspace {
                 self.notify(format!("Export impossible : {error}"), false);
             }
         }
+    }
+
+    fn backup_modals(&mut self, ctx: &egui::Context) {
+        if self.confirm_plain_export
+            && let Some(confirmed) = backup_dialogs::confirm_plain_export(ctx)
+        {
+            self.confirm_plain_export = false;
+            if confirmed {
+                self.export_backup(true);
+            }
+        }
+        let Some(prompt) = &mut self.backup_phrase else {
+            return;
+        };
+        match prompt.show(ctx) {
+            None => {}
+            Some(PhraseOutcome::Cancelled) => self.backup_phrase = None,
+            Some(PhraseOutcome::Submitted(phrase)) => match prompt.backup.open_with_phrase(&phrase)
+            {
+                Ok(imported) => {
+                    self.backup_phrase = None;
+                    self.merge_backup(imported);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "backup decryption refused");
+                    prompt.error = Some("Phrase incorrecte ou fichier corrompu.".into());
+                }
+            },
+        }
+    }
+
+    fn export_backup(&mut self, plain: bool) {
+        let (file_name, filter, extension) = if plain {
+            ("ssh-manager-backup.json", "JSON non chiffré", "json")
+        } else {
+            (
+                "ssh-manager-backup.enc",
+                "Sauvegarde chiffrée SSH Manager",
+                "enc",
+            )
+        };
+        let Some(target) = rfd::FileDialog::new()
+            .set_title("Exporter les connexions")
+            .set_file_name(file_name)
+            .add_filter(filter, &[extension])
+            .save_file()
+        else {
+            return;
+        };
+        let content = if plain {
+            backup::export_plain(&self.data)
+        } else {
+            self.vault.export_backup(&self.data)
+        };
+        match std::fs::write(&target, content) {
+            Ok(()) => {
+                tracing::info!(path = %target.display(), plain, connections = self.data.library.connections.len(), "backup exported");
+                self.notify(format!("Exporté : {}", target.display()), true);
+            }
+            Err(error) => {
+                tracing::error!(path = %target.display(), %error, "failed to write the backup");
+                self.notify(format!("Export impossible : {error}"), false);
+            }
+        }
+    }
+
+    fn import_backup(&mut self) {
+        let Some(source) = rfd::FileDialog::new()
+            .set_title("Importer des connexions")
+            .add_filter("Sauvegardes SSH Manager", &["enc", "json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let parsed = std::fs::read(&source)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| backup::parse(&bytes).map_err(|error| error.to_string()));
+        match parsed {
+            Ok(Backup::Plain(imported)) => self.merge_backup(imported),
+            Ok(Backup::Encrypted(encrypted)) => match self.vault.open_own_backup(&encrypted) {
+                Some(Ok(imported)) => self.merge_backup(imported),
+                Some(Err(error)) => {
+                    tracing::error!(path = %source.display(), %error, "backup of this vault could not be decrypted");
+                    self.notify("Sauvegarde corrompue : déchiffrement impossible.", false);
+                }
+                // Sauvegarde d'un autre coffre : sa phrase est nécessaire.
+                None => self.backup_phrase = Some(PhrasePrompt::new(encrypted)),
+            },
+            Err(error) => {
+                tracing::warn!(path = %source.display(), %error, "backup file rejected");
+                self.notify(format!("Fichier de sauvegarde invalide : {error}"), false);
+            }
+        }
+    }
+
+    fn merge_backup(&mut self, imported: ssh_manager_vault::VaultData) {
+        let added = backup::merge_into(&mut self.data, imported);
+        tracing::info!(added, "backup imported");
+        self.persist();
+        self.notify(format!("{added} connexion(s) importée(s)"), true);
     }
 
     fn open_recordings(&mut self) {
