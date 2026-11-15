@@ -32,6 +32,7 @@ rustls-platform-verifier.workspace = true
 dirs.workspace               = true
 rand.workspace               = true
 chrono.workspace             = true
+zeroize.workspace            = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

@@ -3,6 +3,9 @@
 use egui::{CornerRadius, Frame, Margin, RichText, Ui};
 use ssh_manager_core::{Connection, ConnectionKind};
 
+use super::key_generator::{KeyGenerator, KeyGeneratorEvent};
+use crate::secure_copy::SecureClipboard;
+use crate::settings::Settings;
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
@@ -27,6 +30,7 @@ pub struct ConnectionForm {
     authentication: Authentication,
     new_group: String,
     errors: Vec<&'static str>,
+    key_generator: Option<KeyGenerator>,
 }
 
 impl ConnectionForm {
@@ -42,13 +46,20 @@ impl ConnectionForm {
             authentication,
             new_group: String::new(),
             errors: Vec::new(),
+            key_generator: None,
             connection,
             editing,
         }
     }
 
     /// Affiche le formulaire ; renvoie un résultat quand il se ferme.
-    pub fn show(&mut self, ctx: &egui::Context, groups: &[String]) -> Option<FormResult> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        groups: &[String],
+        clipboard: &mut SecureClipboard,
+        settings: &Settings,
+    ) -> Option<FormResult> {
         let mut result = None;
         let modal = egui::Modal::new(egui::Id::unique("connection-form"))
             .backdrop_color(color::tint(egui::Color32::BLACK, 150))
@@ -61,7 +72,7 @@ impl ConnectionForm {
             )
             .show(ctx, |ui| {
                 ui.set_width(520.0);
-                result = self.body(ui, groups);
+                result = self.body(ui, groups, clipboard, settings);
             });
         if modal.should_close() && result.is_none() {
             result = Some(FormResult::Cancelled);
@@ -69,7 +80,13 @@ impl ConnectionForm {
         result
     }
 
-    fn body(&mut self, ui: &mut Ui, groups: &[String]) -> Option<FormResult> {
+    fn body(
+        &mut self,
+        ui: &mut Ui,
+        groups: &[String],
+        clipboard: &mut SecureClipboard,
+        settings: &Settings,
+    ) -> Option<FormResult> {
         let title = if self.editing {
             "Modifier la connexion"
         } else {
@@ -127,7 +144,7 @@ impl ConnectionForm {
             });
         });
 
-        self.authentication_fields(ui);
+        self.authentication_fields(ui, clipboard, settings);
         ui.add_space(4.0);
         ui.checkbox(&mut self.connection.favorite, "Ajouter aux favoris");
 
@@ -163,7 +180,12 @@ impl ConnectionForm {
         response
     }
 
-    fn authentication_fields(&mut self, ui: &mut Ui) {
+    fn authentication_fields(
+        &mut self,
+        ui: &mut Ui,
+        clipboard: &mut SecureClipboard,
+        settings: &Settings,
+    ) {
         if self.connection.kind == ConnectionKind::Ftp {
             field(ui, "Mot de passe", |ui| {
                 ui.add(
@@ -219,7 +241,35 @@ impl ConnectionForm {
                         }
                     }
                 });
+                self.key_generation(ui, clipboard, settings);
             }
+        }
+    }
+
+    fn key_generation(
+        &mut self,
+        ui: &mut Ui,
+        clipboard: &mut SecureClipboard,
+        settings: &Settings,
+    ) {
+        ui.add_space(6.0);
+        let Some(generator) = &mut self.key_generator else {
+            if widgets::secondary_button(ui, "+ Créer une nouvelle clé").clicked() {
+                let label = if self.connection.name.trim().is_empty() {
+                    self.connection.host.trim()
+                } else {
+                    self.connection.name.trim()
+                };
+                self.key_generator = Some(KeyGenerator::new(label));
+            }
+            return;
+        };
+        match generator.show(ui, clipboard, settings) {
+            Some(KeyGeneratorEvent::Generated(path)) => {
+                self.connection.private_key_path = Some(path.display().to_string());
+            }
+            Some(KeyGeneratorEvent::Closed) => self.key_generator = None,
+            None => {}
         }
     }
 

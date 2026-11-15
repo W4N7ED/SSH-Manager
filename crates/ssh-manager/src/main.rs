@@ -6,11 +6,14 @@
 mod app;
 mod background;
 mod clipboard;
+mod external_terminal;
 mod files;
 mod recordings;
 mod screens;
+mod secure_copy;
 mod session;
 mod settings;
+mod ssh_keys;
 mod startup;
 mod theme;
 mod widgets;

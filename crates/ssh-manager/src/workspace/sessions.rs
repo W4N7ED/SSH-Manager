@@ -65,6 +65,7 @@ impl OpenSession {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Home,
+    Toolbox,
     Session(u64),
 }
 
@@ -101,6 +102,18 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
                     .clicked()
                     {
                         workspace.active = ActiveTab::Home;
+                    }
+                    if tab(
+                        ui,
+                        workspace.active == ActiveTab::Toolbox,
+                        None,
+                        "⚒  Boîte à outils",
+                        false,
+                    )
+                    .0
+                    .clicked()
+                    {
+                        workspace.active = ActiveTab::Toolbox;
                     }
                     for session in &workspace.sessions {
                         let state = session.state();

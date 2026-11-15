@@ -4,6 +4,7 @@ use egui::{CornerRadius, Frame, Margin, RichText, Ui};
 use ssh_manager_core::format;
 
 use super::{Action, Workspace, now_millis};
+use crate::external_terminal::ExternalShell;
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
@@ -92,6 +93,23 @@ pub fn show(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
                 false,
             ));
             facts_table(ui, &facts);
+            let pinned = connection.kind.uses_host_key()
+                && workspace.data.host_keys.contains_key(&connection.host_key_id());
+            if pinned {
+                let forget = egui::Button::new(
+                    RichText::new("Oublier l'empreinte du serveur")
+                        .font(theme::sans(12.0))
+                        .color(color::TEXT_MUTED),
+                )
+                .frame(false);
+                if ui
+                    .add(forget)
+                    .on_hover_text("À faire après une réinstallation du serveur : la prochaine connexion épinglera sa nouvelle clé.")
+                    .clicked()
+                {
+                    actions.push(Action::ForgetHostKey(connection.id.clone()));
+                }
+            }
 
             ui.add_space(14.0);
             let primary = if connection.kind.is_file_transfer() {
@@ -106,6 +124,28 @@ pub fn show(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
                 && full_width_button(ui, "Ouvrir en SFTP", color::ELEVATED, color::TEXT).clicked()
             {
                 actions.push(Action::OpenFiles(connection.id.clone()));
+            }
+            if connection.kind == ssh_manager_core::ConnectionKind::Ssh {
+                ui.columns(2, |columns| {
+                    for (column, shell) in columns
+                        .iter_mut()
+                        .zip([ExternalShell::PowerShell, ExternalShell::Cmd])
+                    {
+                        let label = match shell {
+                            ExternalShell::PowerShell => "PowerShell",
+                            ExternalShell::Cmd => "CMD",
+                        };
+                        if full_width_button(column, label, color::ELEVATED, color::TEXT_MUTED)
+                            .on_hover_text(format!("Ouvrir dans {} avec le client ssh de Windows", shell.label()))
+                            .clicked()
+                        {
+                            actions.push(Action::OpenExternal {
+                                id: connection.id.clone(),
+                                shell,
+                            });
+                        }
+                    }
+                });
             }
             if full_width_button(ui, "Modifier", color::ELEVATED, color::TEXT).clicked() {
                 actions.push(Action::Edit(connection.id.clone()));

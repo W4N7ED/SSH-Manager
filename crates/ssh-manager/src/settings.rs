@@ -32,6 +32,9 @@ pub struct Settings {
     pub paste_mode: PasteMode,
     /// Enregistre le texte de chaque session terminal (chiffré).
     pub record_sessions: bool,
+    /// Efface le presse-papiers après la copie d'un secret.
+    pub clipboard_auto_clear: bool,
+    pub clipboard_clear_seconds: u32,
 }
 
 impl Default for Settings {
@@ -39,6 +42,8 @@ impl Default for Settings {
         Self {
             paste_mode: PasteMode::default(),
             record_sessions: true,
+            clipboard_auto_clear: true,
+            clipboard_clear_seconds: 30,
         }
     }
 }
@@ -101,6 +106,8 @@ mod tests {
         let settings = Settings {
             paste_mode: PasteMode::CtrlV,
             record_sessions: false,
+            clipboard_auto_clear: false,
+            clipboard_clear_seconds: 120,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);

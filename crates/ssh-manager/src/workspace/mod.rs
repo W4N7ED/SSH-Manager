@@ -1,13 +1,16 @@
 //! L'espace de travail : tout ce qui s'affiche une fois le coffre ouvert.
 
+mod command_palette;
 mod form;
 mod inspector;
+mod key_generator;
 mod list;
 mod password_prompt;
 mod rail;
 mod recordings_dialog;
 mod sessions;
 mod settings_dialog;
+mod toolbox;
 mod top_bar;
 
 use std::path::{Path, PathBuf};
@@ -21,10 +24,12 @@ use tokio::runtime::Runtime;
 use crate::files::FileBrowser;
 use crate::files::view::BrowserView;
 use crate::recordings::{self, Recorder, RecordingError};
+use crate::secure_copy::SecureClipboard;
 use crate::session::ssh::{SshSession, TerminalBuffers, lock};
 use crate::settings::Settings;
 use crate::theme::{self, color, radius};
 
+use command_palette::{CommandPalette, PaletteOutcome};
 pub use form::ConnectionForm;
 pub use list::SortState;
 use password_prompt::{PasswordPrompt, PromptResult};
@@ -49,8 +54,20 @@ pub enum Action {
     Open(String),
     /// Ouvre une connexion SSH en navigateur de fichiers (SFTP).
     OpenFiles(String),
+    /// Ouvre une connexion SSH dans PowerShell ou l'invite de commandes.
+    OpenExternal {
+        id: String,
+        shell: crate::external_terminal::ExternalShell,
+    },
+    /// Retire l'empreinte épinglée d'un serveur (réinstallation légitime).
+    ForgetHostKey(String),
+    /// Connexion ponctuelle saisie dans la recherche, non enregistrée.
+    QuickConnect(Box<Connection>),
+    /// Ouvre le formulaire prérempli avec une saisie `user@hôte:port`.
+    SaveQuickTarget(Box<Connection>),
     OpenSettings,
     OpenRecordings,
+    OpenToolbox,
     NewConnection {
         group: Option<String>,
     },
@@ -103,6 +120,9 @@ pub struct Workspace {
     pub settings: Settings,
     settings_open: bool,
     recordings_dialog: Option<RecordingsDialog>,
+    clipboard: SecureClipboard,
+    toolbox: toolbox::Toolbox,
+    palette: Option<CommandPalette>,
     /// Onglet à relancer en place une fois le mot de passe saisi.
     reconnect_after_prompt: Option<u64>,
 }
@@ -137,6 +157,9 @@ impl Workspace {
             settings: Settings::load(),
             settings_open: false,
             recordings_dialog: None,
+            clipboard: SecureClipboard::default(),
+            toolbox: toolbox::Toolbox::default(),
+            palette: None,
             reconnect_after_prompt: None,
         };
         if let Some(text) = notice {
@@ -164,6 +187,8 @@ impl Workspace {
     pub fn ui(&mut self, ui: &mut Ui) {
         let mut actions = Vec::new();
         self.pin_learned_host_keys();
+        self.clipboard.tick(ui.ctx());
+        self.global_shortcuts(ui.ctx(), &mut actions);
 
         top_bar::show(self, ui, &mut actions);
         sessions::tab_bar(self, ui, &mut actions);
@@ -179,6 +204,14 @@ impl Workspace {
                 })
                 .show(ui, |ui| match self.active {
                     ActiveTab::Home => self.home(ui, &mut actions),
+                    ActiveTab::Toolbox => {
+                        if self
+                            .toolbox
+                            .show(ui, &mut self.clipboard, &mut self.settings)
+                        {
+                            self.save_settings();
+                        }
+                    }
                     ActiveTab::Session(id) => {
                         if let Some(session) =
                             self.sessions.iter_mut().find(|session| session.id == id)
@@ -227,7 +260,12 @@ impl Workspace {
 
     fn modals(&mut self, ui: &Ui, actions: &mut Vec<Action>) {
         if let Some(form) = &mut self.form
-            && let Some(result) = form.show(ui.ctx(), &self.data.library.groups)
+            && let Some(result) = form.show(
+                ui.ctx(),
+                &self.data.library.groups,
+                &mut self.clipboard,
+                &self.settings,
+            )
         {
             if let form::FormResult::Saved(connection) = result {
                 actions.push(Action::Save(connection));
@@ -260,12 +298,46 @@ impl Workspace {
             }
         }
         self.recordings_modal(ui.ctx());
+        if let Some(palette) = &mut self.palette {
+            match palette.show(ui.ctx(), &self.data.library.connections) {
+                Some(PaletteOutcome::Run(action)) => {
+                    self.palette = None;
+                    actions.push(action);
+                }
+                Some(PaletteOutcome::Close) => self.palette = None,
+                None => {}
+            }
+        }
         if self.settings_open && settings_dialog::show(ui.ctx(), &mut self.settings) {
             self.settings_open = false;
-            if let Err(error) = self.settings.save() {
-                tracing::error!(%error, "failed to save the settings");
-                self.notify(format!("Réglages non enregistrés : {error}"), false);
-            }
+            self.save_settings();
+        }
+    }
+
+    /// Raccourcis de l'application, retirés du flux avant que le terminal ne
+    /// les voie (comme dans l'ancienne app, ils priment sur le shell).
+    fn global_shortcuts(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let (palette, new_connection) = ctx.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::CTRL, egui::Key::K),
+                input.consume_key(egui::Modifiers::CTRL, egui::Key::N),
+            )
+        });
+        if palette {
+            self.palette = match self.palette {
+                Some(_) => None,
+                None => Some(CommandPalette::default()),
+            };
+        }
+        if new_connection && self.form.is_none() {
+            actions.push(Action::NewConnection { group: None });
+        }
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(error) = self.settings.save() {
+            tracing::error!(%error, "failed to save the settings");
+            self.notify(format!("Réglages non enregistrés : {error}"), false);
         }
     }
 
@@ -294,8 +366,18 @@ impl Workspace {
         match action {
             Action::Open(id) => self.open(&id),
             Action::OpenFiles(id) => self.open_files(&id),
+            Action::OpenExternal { id, shell } => self.open_external(&id, shell),
+            Action::ForgetHostKey(id) => self.forget_host_key(&id),
+            Action::QuickConnect(connection) => {
+                tracing::info!(target = %connection.target(), "quick connection opened");
+                self.open_connection(*connection);
+            }
+            Action::SaveQuickTarget(connection) => {
+                self.form = Some(ConnectionForm::new(*connection, false));
+            }
             Action::OpenSettings => self.settings_open = true,
             Action::OpenRecordings => self.open_recordings(),
+            Action::OpenToolbox => self.active = ActiveTab::Toolbox,
             Action::CloseSession(id) => self.close_session(id),
             Action::Reconnect(id) => self.reconnect(id, false),
             Action::DuplicateSession(id) => self.duplicate_session(id),
@@ -336,7 +418,18 @@ impl Workspace {
                 library.upsert(*connection);
             }
             Action::Delete(id) => {
-                library.remove(&id);
+                // Comme l'ancienne app : l'empreinte part avec la dernière connexion
+                // vers ce serveur, pour qu'une réinstallation future puisse être épinglée.
+                if let Some(host) = library.find(&id).map(Connection::host_key_id) {
+                    library.remove(&id);
+                    let still_used = library
+                        .connections
+                        .iter()
+                        .any(|other| other.host_key_id() == host);
+                    if !still_used && self.data.host_keys.remove(&host).is_some() {
+                        tracing::info!(%host, "host key forgotten with its last connection");
+                    }
+                }
                 self.selected = None;
             }
             Action::ToggleFavorite(id) => library.toggle_favorite(&id),
@@ -375,6 +468,30 @@ impl Workspace {
         if let Some(mut connection) = self.data.library.find(id).cloned() {
             connection.kind = ssh_manager_core::ConnectionKind::Sftp;
             self.open_connection(connection);
+        }
+    }
+
+    fn open_external(&mut self, id: &str, shell: crate::external_terminal::ExternalShell) {
+        let Some(connection) = self.data.library.find(id).cloned() else {
+            return;
+        };
+        if let Err(error) = crate::external_terminal::open(&connection, shell) {
+            tracing::error!(%error, target = %connection.target(), "failed to open an external terminal");
+            self.notify(format!("Ouverture impossible : {error}"), false);
+        }
+    }
+
+    fn forget_host_key(&mut self, id: &str) {
+        let Some(host) = self.data.library.find(id).map(Connection::host_key_id) else {
+            return;
+        };
+        if self.data.host_keys.remove(&host).is_some() {
+            tracing::warn!(%host, "host key forgotten at the user's request");
+            self.persist();
+            self.notify(
+                "Empreinte oubliée : elle sera épinglée à la prochaine connexion.",
+                true,
+            );
         }
     }
 
