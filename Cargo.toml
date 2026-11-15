@@ -68,6 +68,9 @@ rustls                   = { version = "0.23.46", default-features = false, feat
 tokio-rustls             = { version = "0.26.6", default-features = false, features = ["ring"] }
 rustls-platform-verifier = "0.7.1"
 
+# Compilation : icône et version intégrées à l'exécutable Windows.
+winresource = { version = "0.1.34", default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

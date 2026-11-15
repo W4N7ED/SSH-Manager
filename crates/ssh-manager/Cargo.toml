@@ -36,3 +36,6 @@ zeroize.workspace            = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+[build-dependencies]
+winresource.workspace = true

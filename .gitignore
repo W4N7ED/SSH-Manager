@@ -14,3 +14,6 @@ Desktop.ini
 
 # ── Claude Code (config locale) ───────────────────────────────
 .claude/settings.local.json
+
+# Livrables produits par scripts/build-release.ps1
+/dist/

@@ -16,6 +16,7 @@ mod settings;
 mod ssh_keys;
 mod startup;
 mod theme;
+mod uninstall_export;
 mod widgets;
 mod window_chrome;
 mod workspace;
@@ -54,16 +55,37 @@ fn init_logging() {
     }
 }
 
+/// Icône de la fenêtre et de la barre des tâches (l'exécutable a la sienne,
+/// intégrée par `build.rs`).
+fn window_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icons/icon.png"))
+        .inspect_err(|error| tracing::warn!(%error, "window icon could not be decoded"))
+        .ok()
+}
+
 fn main() -> eframe::Result {
     init_logging();
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "application started");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        portable = paths::is_portable(),
+        data_dir = %paths::data_dir().display(),
+        "application started"
+    );
 
-    let viewport = egui::ViewportBuilder::default()
+    if std::env::args().any(|argument| argument == uninstall_export::FLAG) {
+        uninstall_export::run();
+        return Ok(());
+    }
+
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title("SSH Manager")
         .with_inner_size([1400.0, 900.0])
         .with_min_inner_size([960.0, 600.0])
         // Barre de titre native retirée : l'app dessine la sienne (window_chrome).
         .with_decorations(false);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
