@@ -14,7 +14,8 @@ use ssh_manager_core::{Connection, ConnectionKind};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 
-use super::Backend;
+use super::transfer::TransferHooks;
+use super::{Backend, FsError};
 use crate::session::transport::{SharedStatus, lock};
 
 const USER: &str = "tester";
@@ -29,6 +30,19 @@ enum Node {
 
 /// Système de fichiers partagé entre le serveur et les assertions du test.
 type MemoryFs = Arc<Mutex<BTreeMap<String, Node>>>;
+type Modes = Arc<Mutex<HashMap<String, u32>>>;
+
+static NOT_CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn quiet_hooks<'a>(
+    progress: &'a mut (dyn FnMut(u64) + Send),
+    cancelled: &'a std::sync::atomic::AtomicBool,
+) -> TransferHooks<'a> {
+    TransferHooks {
+        progress,
+        cancelled,
+    }
+}
 
 fn parent_of(path: &str) -> &str {
     match path.rfind('/') {
@@ -62,6 +76,8 @@ fn ok(id: u32) -> Status {
 /// Sous-système SFTP minimal : de quoi exercer chaque opération du navigateur.
 struct MemorySftp {
     fs: MemoryFs,
+    /// Droits reçus par `setstat`, par chemin.
+    modes: Modes,
     /// Dossiers ouverts dont le contenu a déjà été envoyé.
     listed_handles: HashMap<String, bool>,
 }
@@ -215,6 +231,31 @@ impl russh_sftp::server::Handler for MemorySftp {
         Ok(ok(id))
     }
 
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<Status, Self::Error> {
+        let mut fs = lock(&self.fs);
+        let node = fs.remove(&oldpath).ok_or(StatusCode::NoSuchFile)?;
+        fs.insert(newpath, node);
+        Ok(ok(id))
+    }
+
+    async fn setstat(
+        &mut self,
+        id: u32,
+        path: String,
+        attrs: FileAttributes,
+    ) -> Result<Status, Self::Error> {
+        if !lock(&self.fs).contains_key(&path) {
+            return Err(StatusCode::NoSuchFile);
+        }
+        lock(&self.modes).insert(path, attrs.permissions.ok_or(StatusCode::BadMessage)?);
+        Ok(ok(id))
+    }
+
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
         self.stat(id, handle).await
     }
@@ -232,6 +273,7 @@ impl russh_sftp::server::Handler for MemorySftp {
 #[derive(Clone)]
 struct SftpServer {
     fs: MemoryFs,
+    modes: Modes,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 
@@ -269,6 +311,7 @@ impl server::Handler for SftpServer {
                 session.channel_success(channel_id)?;
                 let handler = MemorySftp {
                     fs: self.fs.clone(),
+                    modes: self.modes.clone(),
                     listed_handles: HashMap::new(),
                 };
                 tokio::spawn(russh_sftp::server::run(channel.into_stream(), handler));
@@ -281,7 +324,13 @@ impl server::Handler for SftpServer {
 
 /// Démarre le serveur et renvoie son port avec le système de fichiers servi,
 /// qui contient déjà le dossier d'accueil.
-fn start_server(runtime: &Runtime) -> (u16, MemoryFs) {
+struct TestServer {
+    port: u16,
+    fs: MemoryFs,
+    modes: Modes,
+}
+
+fn start_server(runtime: &Runtime) -> TestServer {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("génération de la clé d'hôte");
     let config = Arc::new(server::Config {
@@ -297,8 +346,10 @@ fn start_server(runtime: &Runtime) -> (u16, MemoryFs) {
         .block_on(TcpListener::bind("127.0.0.1:0"))
         .expect("port local libre");
     let port = listener.local_addr().expect("adresse locale").port();
+    let modes: Modes = Arc::new(Mutex::new(HashMap::new()));
     let handler = SftpServer {
         fs: fs.clone(),
+        modes: modes.clone(),
         channels: Arc::new(Mutex::new(HashMap::new())),
     };
     runtime.spawn(async move {
@@ -308,7 +359,7 @@ fn start_server(runtime: &Runtime) -> (u16, MemoryFs) {
             }
         }
     });
-    (port, fs)
+    TestServer { port, fs, modes }
 }
 
 fn connect(runtime: &Runtime, port: u16) -> Backend {
@@ -343,7 +394,7 @@ fn names(runtime: &Runtime, backend: &mut Backend, path: &str) -> Vec<String> {
 #[test]
 fn should_resolve_the_home_folder() {
     let runtime = Runtime::new().unwrap();
-    let (port, _fs) = start_server(&runtime);
+    let TestServer { port, .. } = start_server(&runtime);
     let mut backend = connect(&runtime, port);
     assert_eq!(runtime.block_on(backend.home()).unwrap(), HOME);
 }
@@ -351,7 +402,7 @@ fn should_resolve_the_home_folder() {
 #[test]
 fn should_list_folders_first_with_sizes_and_permissions() {
     let runtime = Runtime::new().unwrap();
-    let (port, fs) = start_server(&runtime);
+    let TestServer { port, fs, .. } = start_server(&runtime);
     put(&fs, "/home/tester/notes.txt", Node::File(b"hello".to_vec()));
     put(&fs, "/home/tester/www", Node::Directory);
     let mut backend = connect(&runtime, port);
@@ -371,7 +422,7 @@ fn should_list_folders_first_with_sizes_and_permissions() {
 #[test]
 fn should_upload_then_download_identical_bytes() {
     let runtime = Runtime::new().unwrap();
-    let (port, fs) = start_server(&runtime);
+    let TestServer { port, fs, .. } = start_server(&runtime);
     let mut backend = connect(&runtime, port);
     let local_dir = std::env::temp_dir().join(format!("ssh-manager-sftp-{}", uuid_like()));
     std::fs::create_dir_all(&local_dir).unwrap();
@@ -381,11 +432,19 @@ fn should_upload_then_download_identical_bytes() {
     std::fs::write(&source, &content).unwrap();
 
     let uploaded = runtime
-        .block_on(backend.upload(&source, "/home/tester/copy.bin"))
+        .block_on(backend.upload(
+            &source,
+            "/home/tester/copy.bin",
+            quiet_hooks(&mut |_| {}, &NOT_CANCELLED),
+        ))
         .unwrap();
     let target = local_dir.join("downloaded.bin");
     let downloaded = runtime
-        .block_on(backend.download("/home/tester/copy.bin", &target))
+        .block_on(backend.download(
+            "/home/tester/copy.bin",
+            &target,
+            quiet_hooks(&mut |_| {}, &NOT_CANCELLED),
+        ))
         .unwrap();
 
     assert_eq!(uploaded, content.len() as u64);
@@ -400,7 +459,7 @@ fn should_upload_then_download_identical_bytes() {
 #[test]
 fn should_create_a_folder() {
     let runtime = Runtime::new().unwrap();
-    let (port, _fs) = start_server(&runtime);
+    let TestServer { port, .. } = start_server(&runtime);
     let mut backend = connect(&runtime, port);
     runtime
         .block_on(backend.create_dir("/home/tester/backups"))
@@ -411,7 +470,7 @@ fn should_create_a_folder() {
 #[test]
 fn should_remove_a_whole_tree_deepest_first() {
     let runtime = Runtime::new().unwrap();
-    let (port, fs) = start_server(&runtime);
+    let TestServer { port, fs, .. } = start_server(&runtime);
     put(&fs, "/home/tester/site", Node::Directory);
     put(
         &fs,
@@ -442,7 +501,7 @@ fn should_remove_a_whole_tree_deepest_first() {
 #[test]
 fn should_report_a_missing_folder_as_an_operation_error() {
     let runtime = Runtime::new().unwrap();
-    let (port, _fs) = start_server(&runtime);
+    let TestServer { port, .. } = start_server(&runtime);
     let mut backend = connect(&runtime, port);
     let error = runtime.block_on(backend.list("/nowhere")).unwrap_err();
     assert!(
@@ -454,4 +513,58 @@ fn should_report_a_missing_folder_as_an_operation_error() {
 /// Suffixe unique pour isoler les dossiers temporaires de tests parallèles.
 fn uuid_like() -> String {
     format!("{}-{:x}", std::process::id(), rand::random::<u64>())
+}
+
+#[test]
+fn should_rename_an_entry() {
+    let runtime = Runtime::new().unwrap();
+    let TestServer { port, fs, .. } = start_server(&runtime);
+    put(&fs, "/home/tester/draft.txt", Node::File(b"v1".to_vec()));
+    let mut backend = connect(&runtime, port);
+    runtime
+        .block_on(backend.rename("/home/tester/draft.txt", "/home/tester/final.txt"))
+        .unwrap();
+    assert_eq!(names(&runtime, &mut backend, HOME), ["final.txt"]);
+}
+
+#[test]
+fn should_send_the_requested_permissions() {
+    let runtime = Runtime::new().unwrap();
+    let TestServer { port, fs, modes } = start_server(&runtime);
+    put(
+        &fs,
+        "/home/tester/deploy.sh",
+        Node::File(b"#!/bin/sh".to_vec()),
+    );
+    let mut backend = connect(&runtime, port);
+    runtime
+        .block_on(backend.set_permissions("/home/tester/deploy.sh", 0o755))
+        .unwrap();
+    assert_eq!(lock(&modes).get("/home/tester/deploy.sh"), Some(&0o755));
+}
+
+#[test]
+fn should_remove_the_partial_remote_file_when_an_upload_is_cancelled() {
+    let runtime = Runtime::new().unwrap();
+    let TestServer { port, fs, .. } = start_server(&runtime);
+    let mut backend = connect(&runtime, port);
+    let local = std::env::temp_dir().join(format!("ssh-manager-cancel-{}", uuid_like()));
+    std::fs::write(&local, vec![1u8; 1_000_000]).unwrap();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    // L'utilisateur annule dès que le premier bloc est parti.
+    let mut progress = |_| cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    let result = runtime.block_on(backend.upload(
+        &local,
+        "/home/tester/big.bin",
+        quiet_hooks(&mut progress, &cancelled),
+    ));
+    assert!(
+        matches!(result, Err(FsError::Cancelled)),
+        "obtenu : {result:?}"
+    );
+    assert!(
+        !lock(&fs).contains_key("/home/tester/big.bin"),
+        "fichier partiel retiré"
+    );
+    std::fs::remove_file(local).unwrap();
 }

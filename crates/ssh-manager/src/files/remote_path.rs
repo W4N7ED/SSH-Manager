@@ -61,9 +61,28 @@ pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
 }
 
+/// Droits saisis en octal (« 755 », « 0644 ») ; `None` si la saisie n'en est pas.
+pub fn parse_mode(text: &str) -> Option<u32> {
+    let digits = text.trim();
+    if digits.is_empty() || digits.len() > 4 {
+        return None;
+    }
+    u32::from_str_radix(digits, 8).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_parse_octal_permissions() {
+        assert_eq!(parse_mode("755"), Some(0o755));
+        assert_eq!(parse_mode(" 0644 "), Some(0o644));
+        assert_eq!(parse_mode("4755"), Some(0o4755));
+        assert_eq!(parse_mode("789"), None, "8 et 9 ne sont pas octaux");
+        assert_eq!(parse_mode("77777"), None);
+        assert_eq!(parse_mode(""), None);
+    }
 
     #[test]
     fn should_join_without_doubling_separators() {

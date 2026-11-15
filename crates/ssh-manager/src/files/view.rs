@@ -5,7 +5,7 @@ use egui::{Color32, CornerRadius, Frame, Margin, RichText, Sense, Stroke, Ui, Ve
 use ssh_manager_core::format;
 
 use super::browser::{FileBrowser, Listing};
-use super::remote_path;
+use super::{remote_path, transfer};
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
@@ -14,11 +14,18 @@ const DATE_WIDTH: f32 = 160.0;
 const RIGHTS_WIDTH: f32 = 88.0;
 const ROW_HEIGHT: f32 = 36.0;
 
+/// Saisie en ligne au-dessus de la liste.
+enum InlineEdit {
+    NewFolder,
+    Rename { original: String },
+    Permissions { name: String },
+}
+
 /// État d'affichage propre à l'onglet (sélection, saisie en cours).
 #[derive(Default)]
 pub struct BrowserView {
     selected: Option<String>,
-    new_folder: Option<String>,
+    editing: Option<(InlineEdit, String)>,
     confirm_delete: bool,
 }
 
@@ -37,6 +44,7 @@ pub fn show(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView) -> Optio
         view.confirm_delete = false;
     }
     let mut close = None;
+    accept_dropped_files(ui, browser);
 
     Frame::new()
         .fill(color::SURFACE)
@@ -47,22 +55,67 @@ pub fn show(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView) -> Optio
                 close = Some(CloseRequested);
             }
             ui.add(egui::Separator::default().spacing(0.0));
-            new_folder_row(ui, browser, view);
+            inline_edit_row(ui, browser, view);
             columns(ui);
             let rows_height = ui.available_height() - 38.0;
             egui::ScrollArea::vertical()
                 .max_height(rows_height)
                 .auto_shrink([false, false])
                 .show(ui, |ui| rows(ui, browser, view, &listing));
-            footer(ui, view, &listing);
+            footer(ui, browser, view, &listing);
         });
+    drop_overlay(ui, &listing.path);
     close
+}
+
+/// Fichiers et dossiers glissés depuis l'Explorateur : envoyés dans le dossier
+/// courant, à la suite des transferts déjà demandés.
+fn accept_dropped_files(ui: &Ui, browser: &FileBrowser) {
+    let dropped: Vec<std::path::PathBuf> = ui.input(|input| {
+        input
+            .raw
+            .dropped_files
+            .iter()
+            .map(|file| file.path().to_path_buf())
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect()
+    });
+    for path in dropped {
+        browser.upload(path);
+    }
+}
+
+/// Voile affiché pendant qu'on survole la fenêtre avec des fichiers.
+fn drop_overlay(ui: &Ui, path: &str) {
+    if ui.input(|input| input.raw.hovered_files.is_empty()) {
+        return;
+    }
+    let rect = ui.max_rect();
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(radius::MEDIUM),
+        color::tint(color::ACCENT, 40),
+    );
+    painter.rect_stroke(
+        rect.shrink(2.0),
+        CornerRadius::same(radius::MEDIUM),
+        Stroke::new(2.0, color::ACCENT),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("Déposer pour envoyer dans {path}"),
+        theme::sans_semibold(16.0),
+        color::TEXT,
+    );
 }
 
 /// Renvoie vrai si la fermeture de l'onglet est demandée.
 fn header(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView, listing: &Listing) -> bool {
     let mut close = false;
-    let idle = listing.busy.is_none();
+    let idle = listing.busy.is_none() && listing.transfer.is_none();
     Frame::new()
         .inner_margin(Margin::symmetric(14, 10))
         .show(ui, |ui| {
@@ -133,11 +186,45 @@ fn actions(
             view.confirm_delete = true;
         }
     }
+    let rename_shortcut = ui.input(|input| input.key_pressed(egui::Key::F2));
+    if (ui
+        .add_enabled(
+            idle && selected.is_some(),
+            toolbar_button("Renommer", color::TEXT),
+        )
+        .on_hover_text("F2")
+        .clicked()
+        || (rename_shortcut && idle && view.editing.is_none()))
+        && let Some(entry) = &selected
+    {
+        let edit = InlineEdit::Rename {
+            original: entry.name.clone(),
+        };
+        view.editing = Some((edit, entry.name.clone()));
+    }
+    if ui
+        .add_enabled(
+            idle && selected.is_some(),
+            toolbar_button("Droits…", color::TEXT),
+        )
+        .clicked()
+        && let Some(entry) = &selected
+    {
+        let current = entry
+            .permissions
+            .as_deref()
+            .and_then(octal_from_symbolic)
+            .unwrap_or_default();
+        let edit = InlineEdit::Permissions {
+            name: entry.name.clone(),
+        };
+        view.editing = Some((edit, current));
+    }
     if ui
         .add_enabled(idle, toolbar_button("Nouveau dossier", color::TEXT))
         .clicked()
     {
-        view.new_folder = Some(String::new());
+        view.editing = Some((InlineEdit::NewFolder, String::new()));
     }
     let can_download = selected.as_ref().is_some_and(|entry| !entry.is_dir);
     if ui
@@ -148,10 +235,11 @@ fn actions(
         .clicked()
         && let Some(entry) = &selected
     {
-        download(browser, &entry.name);
+        download(browser, &entry.name, entry.size);
     }
     if ui
         .add_enabled(idle, toolbar_button("Envoyer", color::TEXT))
+        .on_hover_text("Ou glissez des fichiers et dossiers depuis l'Explorateur")
         .clicked()
     {
         // Plusieurs fichiers possibles : ils partent l'un après l'autre.
@@ -165,14 +253,26 @@ fn actions(
     }
 }
 
-fn download(browser: &FileBrowser, name: &str) {
+/// « rwxr-xr-x » → « 755 », pour préremplir la saisie des droits.
+fn octal_from_symbolic(symbolic: &str) -> Option<String> {
+    let bits: Vec<bool> = symbolic.chars().map(|character| character != '-').collect();
+    if bits.len() != 9 {
+        return None;
+    }
+    let digit = |offset: usize| {
+        u8::from(bits[offset]) * 4 + u8::from(bits[offset + 1]) * 2 + u8::from(bits[offset + 2])
+    };
+    Some(format!("{}{}{}", digit(0), digit(3), digit(6)))
+}
+
+fn download(browser: &FileBrowser, name: &str, size: u64) {
     let target = rfd::FileDialog::new()
         .set_title("Enregistrer sous")
         .set_file_name(name)
         .set_directory(dirs::download_dir().unwrap_or_default())
         .save_file();
     if let Some(target) = target {
-        browser.download(name.to_owned(), target);
+        browser.download(name.to_owned(), size, target);
     }
 }
 
@@ -205,25 +305,49 @@ fn breadcrumb(ui: &mut Ui, browser: &FileBrowser, path: &str, idle: bool) {
     ui.spacing_mut().item_spacing.x = 8.0;
 }
 
-fn new_folder_row(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView) {
-    let Some(name) = &mut view.new_folder else {
+fn inline_edit_row(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView) {
+    let Some((edit, text)) = &mut view.editing else {
         return;
+    };
+    let (hint, action, valid) = match edit {
+        InlineEdit::NewFolder => (
+            "Nom du nouveau dossier",
+            "Créer",
+            remote_path::is_valid_name(text),
+        ),
+        InlineEdit::Rename { original } => (
+            "Nouveau nom",
+            "Renommer",
+            remote_path::is_valid_name(text) && text.trim() != original,
+        ),
+        InlineEdit::Permissions { .. } => (
+            "Droits en octal, par exemple 755",
+            "Appliquer",
+            remote_path::parse_mode(text).is_some(),
+        ),
     };
     let mut finished = false;
     Frame::new()
         .inner_margin(Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let field = ui
-                    .add(widgets::text_field(name, "Nom du nouveau dossier").desired_width(280.0));
+                let field = ui.add(widgets::text_field(text, hint).desired_width(280.0));
                 field.request_focus();
-                let valid = remote_path::is_valid_name(name);
                 let submitted =
                     field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                if (widgets::primary_button_enabled(ui, valid, "Créer").clicked() || submitted)
+                if (widgets::primary_button_enabled(ui, valid, action).clicked() || submitted)
                     && valid
                 {
-                    browser.create_dir(name.trim().to_owned());
+                    let value = text.trim().to_owned();
+                    match edit {
+                        InlineEdit::NewFolder => browser.create_dir(value),
+                        InlineEdit::Rename { original } => browser.rename(original.clone(), value),
+                        InlineEdit::Permissions { name } => {
+                            if let Some(mode) = remote_path::parse_mode(&value) {
+                                browser.set_permissions(name.clone(), mode);
+                            }
+                        }
+                    }
                     finished = true;
                 }
                 if widgets::secondary_button(ui, "Annuler").clicked()
@@ -231,13 +355,22 @@ fn new_folder_row(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView) {
                 {
                     finished = true;
                 }
-                if !valid && !name.is_empty() {
-                    ui.label(RichText::new("Nom invalide").color(color::DANGER));
+                if let (InlineEdit::Permissions { .. }, Some(mode)) =
+                    (&edit, remote_path::parse_mode(text))
+                {
+                    let preview = remote_path::format_permissions(mode);
+                    ui.label(
+                        RichText::new(preview)
+                            .font(theme::mono(12.0))
+                            .color(color::TEXT_MUTED),
+                    );
+                } else if !valid && !text.is_empty() {
+                    ui.label(RichText::new("Saisie invalide").color(color::DANGER));
                 }
             });
         });
     if finished {
-        view.new_folder = None;
+        view.editing = None;
     }
 }
 
@@ -308,11 +441,11 @@ fn rows(ui: &mut Ui, browser: &FileBrowser, view: &mut BrowserView, listing: &Li
                     if entry.is_dir {
                         browser.open(remote_path::join(&listing.path, &entry.name));
                     } else {
-                        download(browser, &entry.name);
+                        download(browser, &entry.name, entry.size);
                     }
                 }
             }
-            if listing.entries.is_empty() && listing.busy.is_none() {
+            if listing.entries.is_empty() && listing.busy.is_none() && listing.transfer.is_none() {
                 ui.add_space(24.0);
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new("Dossier vide").color(color::TEXT_DIM))
@@ -408,7 +541,43 @@ fn row(
     response
 }
 
-fn footer(ui: &mut Ui, view: &BrowserView, listing: &Listing) {
+/// Barre d'avancement du transfert en cours, avec son bouton d'annulation.
+fn transfer_progress(ui: &mut Ui, browser: &FileBrowser, status: &super::browser::TransferStatus) {
+    if ui
+        .add(toolbar_button("Annuler", color::DANGER))
+        .on_hover_text("Interrompt ce transfert et ceux en attente")
+        .clicked()
+    {
+        browser.cancel_transfers();
+    }
+    let amount = match status.total {
+        Some(total) => format!(
+            "{} / {}",
+            format::file_size(status.done),
+            format::file_size(total)
+        ),
+        None => format::file_size(status.done),
+    };
+    ui.label(
+        RichText::new(amount)
+            .font(theme::mono(11.0))
+            .color(color::TEXT_MUTED),
+    );
+    let fraction = transfer::percent(status.done, status.total).unwrap_or(0.0);
+    ui.add(
+        egui::ProgressBar::new(fraction)
+            .desired_width(180.0)
+            .desired_height(8.0)
+            .fill(color::ACCENT),
+    );
+    ui.label(
+        RichText::new(status.label.as_str())
+            .font(theme::mono(11.0))
+            .color(color::ACCENT_LIGHT),
+    );
+}
+
+fn footer(ui: &mut Ui, browser: &FileBrowser, view: &BrowserView, listing: &Listing) {
     ui.add(egui::Separator::default().spacing(0.0));
     Frame::new()
         .inner_margin(Margin::symmetric(18, 10))
@@ -439,7 +608,9 @@ fn footer(ui: &mut Ui, view: &BrowserView, listing: &Listing) {
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(activity) = &listing.busy {
+                    if let Some(status) = &listing.transfer {
+                        transfer_progress(ui, browser, status);
+                    } else if let Some(activity) = &listing.busy {
                         ui.label(
                             RichText::new(activity.as_str())
                                 .font(font.clone())
@@ -490,4 +661,16 @@ fn toolbar_button(label: &str, tint: Color32) -> egui::Button<'static> {
     .stroke(Stroke::NONE)
     .corner_radius(CornerRadius::same(radius::PILL))
     .min_size(Vec2::new(0.0, 30.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::octal_from_symbolic;
+
+    #[test]
+    fn should_convert_symbolic_permissions_to_octal() {
+        assert_eq!(octal_from_symbolic("rwxr-xr-x").as_deref(), Some("755"));
+        assert_eq!(octal_from_symbolic("rw-r-----").as_deref(), Some("640"));
+        assert_eq!(octal_from_symbolic("rwx"), None);
+    }
 }

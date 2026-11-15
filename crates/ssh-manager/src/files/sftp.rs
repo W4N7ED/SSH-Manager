@@ -8,6 +8,7 @@ use ssh_manager_core::Connection;
 use tokio::io::AsyncWriteExt;
 
 use super::remote_path::format_permissions;
+use super::transfer::{self, CopyOutcome, TransferHooks};
 use super::{FsError, RemoteEntry};
 use crate::session::transport::{self, SharedStatus, SshHandle, network};
 
@@ -88,7 +89,30 @@ impl SftpBackend {
             .map_err(|error| failed("suppression du dossier impossible", error))
     }
 
-    pub async fn download(&mut self, remote: &str, local: &Path) -> Result<u64, FsError> {
+    pub async fn rename(&mut self, from: &str, to: &str) -> Result<(), FsError> {
+        self.sftp
+            .rename(from, to)
+            .await
+            .map_err(|error| failed("renommage impossible", error))
+    }
+
+    pub async fn set_permissions(&mut self, path: &str, mode: u32) -> Result<(), FsError> {
+        let attributes = russh_sftp::protocol::FileAttributes {
+            permissions: Some(mode),
+            ..Default::default()
+        };
+        self.sftp
+            .set_metadata(path, attributes)
+            .await
+            .map_err(|error| failed("modification des droits impossible", error))
+    }
+
+    pub async fn download(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        hooks: TransferHooks<'_>,
+    ) -> Result<u64, FsError> {
         let mut source = self
             .sftp
             .open(remote)
@@ -97,17 +121,25 @@ impl SftpBackend {
         let mut target = tokio::fs::File::create(local)
             .await
             .map_err(|error| failed("création du fichier local impossible", error))?;
-        let bytes = tokio::io::copy(&mut source, &mut target)
+        let outcome = transfer::copy(&mut source, &mut target, hooks.progress, hooks.cancelled)
             .await
             .map_err(|error| failed("transfert interrompu", error))?;
-        target
-            .flush()
-            .await
-            .map_err(|error| failed("écriture locale incomplète", error))?;
-        Ok(bytes)
+        match outcome {
+            CopyOutcome::Completed(bytes) => Ok(bytes),
+            CopyOutcome::Cancelled => {
+                drop(target);
+                transfer::discard_partial_local(local).await;
+                Err(FsError::Cancelled)
+            }
+        }
     }
 
-    pub async fn upload(&mut self, local: &Path, remote: &str) -> Result<u64, FsError> {
+    pub async fn upload(
+        &mut self,
+        local: &Path,
+        remote: &str,
+        hooks: TransferHooks<'_>,
+    ) -> Result<u64, FsError> {
         let mut source = tokio::fs::File::open(local)
             .await
             .map_err(|error| failed("lecture du fichier local impossible", error))?;
@@ -116,7 +148,7 @@ impl SftpBackend {
             .create(remote)
             .await
             .map_err(|error| failed("création du fichier distant impossible", error))?;
-        let bytes = tokio::io::copy(&mut source, &mut target)
+        let outcome = transfer::copy(&mut source, &mut target, hooks.progress, hooks.cancelled)
             .await
             .map_err(|error| failed("transfert interrompu", error))?;
         // La fermeture confirme l'écriture côté serveur : un échec ici est un échec du transfert.
@@ -124,7 +156,16 @@ impl SftpBackend {
             .shutdown()
             .await
             .map_err(|error| failed("le serveur n'a pas confirmé l'écriture", error))?;
-        Ok(bytes)
+        match outcome {
+            CopyOutcome::Completed(bytes) => Ok(bytes),
+            CopyOutcome::Cancelled => {
+                // Un fichier distant tronqué serait pris pour le bon : on le retire.
+                if let Err(error) = self.remove_file(remote).await {
+                    tracing::warn!(%remote, %error, "partial upload could not be removed");
+                }
+                Err(FsError::Cancelled)
+            }
+        }
     }
 
     pub async fn close(self) {

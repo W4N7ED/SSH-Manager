@@ -6,9 +6,13 @@ pub mod remote_path;
 mod sftp;
 #[cfg(test)]
 mod sftp_tests;
+pub mod transfer;
+mod upload_plan;
 pub mod view;
 
 use std::path::Path;
+
+use transfer::TransferHooks;
 
 use ssh_manager_core::{Connection, ConnectionKind};
 
@@ -37,6 +41,9 @@ pub enum FsError {
     /// Échec d'une opération, la session restant utilisable.
     #[error("{0}")]
     Operation(String),
+    /// Transfert interrompu par l'utilisateur ; le fichier partiel est retiré.
+    #[error("transfert annulé")]
+    Cancelled,
 }
 
 /// Dossiers d'abord, puis ordre alphabétique sans casse.
@@ -130,17 +137,41 @@ impl Backend {
         Ok(())
     }
 
-    async fn download(&mut self, remote: &str, local: &Path) -> Result<u64, FsError> {
+    async fn rename(&mut self, from: &str, to: &str) -> Result<(), FsError> {
         match self {
-            Self::Sftp(sftp) => sftp.download(remote, local).await,
-            Self::Ftp(ftp) => ftp.download(remote, local).await,
+            Self::Sftp(sftp) => sftp.rename(from, to).await,
+            Self::Ftp(ftp) => ftp.rename(from, to).await,
         }
     }
 
-    async fn upload(&mut self, local: &Path, remote: &str) -> Result<u64, FsError> {
+    async fn set_permissions(&mut self, path: &str, mode: u32) -> Result<(), FsError> {
         match self {
-            Self::Sftp(sftp) => sftp.upload(local, remote).await,
-            Self::Ftp(ftp) => ftp.upload(local, remote).await,
+            Self::Sftp(sftp) => sftp.set_permissions(path, mode).await,
+            Self::Ftp(ftp) => ftp.set_permissions(path, mode).await,
+        }
+    }
+
+    async fn download(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        hooks: TransferHooks<'_>,
+    ) -> Result<u64, FsError> {
+        match self {
+            Self::Sftp(sftp) => sftp.download(remote, local, hooks).await,
+            Self::Ftp(ftp) => ftp.download(remote, local, hooks).await,
+        }
+    }
+
+    async fn upload(
+        &mut self,
+        local: &Path,
+        remote: &str,
+        hooks: TransferHooks<'_>,
+    ) -> Result<u64, FsError> {
+        match self {
+            Self::Sftp(sftp) => sftp.upload(local, remote, hooks).await,
+            Self::Ftp(ftp) => ftp.upload(local, remote, hooks).await,
         }
     }
 

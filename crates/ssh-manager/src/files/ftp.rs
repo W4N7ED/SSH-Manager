@@ -11,8 +11,8 @@ use ssh_manager_core::Connection;
 use suppaftp::list::{File as ListedFile, PosixPexQuery};
 use suppaftp::tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::FileType;
-use tokio::io::AsyncWriteExt;
 
+use super::transfer::{self, CopyOutcome, TransferHooks};
 use super::{FsError, RemoteEntry};
 use crate::session::transport::SessionError;
 
@@ -146,7 +146,29 @@ impl FtpBackend {
             .map_err(|error| failed("suppression du dossier impossible", error))
     }
 
-    pub async fn download(&mut self, remote: &str, local: &Path) -> Result<u64, FsError> {
+    pub async fn rename(&mut self, from: &str, to: &str) -> Result<(), FsError> {
+        self.stream
+            .rename(from, to)
+            .await
+            .map_err(|error| failed("renommage impossible", error))
+    }
+
+    /// `SITE CHMOD` : extension répandue (vsftpd, ProFTPD, Pure-FTPd), mais
+    /// facultative ; un refus du serveur est rapporté tel quel.
+    pub async fn set_permissions(&mut self, path: &str, mode: u32) -> Result<(), FsError> {
+        self.stream
+            .site(format!("CHMOD {mode:o} {path}"))
+            .await
+            .map(|_| ())
+            .map_err(|error| failed("le serveur refuse la modification des droits", error))
+    }
+
+    pub async fn download(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        hooks: TransferHooks<'_>,
+    ) -> Result<u64, FsError> {
         let mut source = self
             .stream
             .retr_as_stream(remote)
@@ -155,29 +177,64 @@ impl FtpBackend {
         let mut target = tokio::fs::File::create(local)
             .await
             .map_err(|error| failed("création du fichier local impossible", error))?;
-        let bytes = tokio::io::copy(&mut source, &mut target)
+        let outcome = transfer::copy(&mut source, &mut target, hooks.progress, hooks.cancelled)
             .await
             .map_err(|error| failed("transfert interrompu", error))?;
-        target
-            .flush()
-            .await
-            .map_err(|error| failed("écriture locale incomplète", error))?;
-        // Seule la réponse finale du serveur dit si le transfert a vraiment réussi.
-        source
-            .finish()
-            .await
-            .map_err(|error| failed("le serveur signale un transfert incomplet", error))?;
-        Ok(bytes)
+        match outcome {
+            CopyOutcome::Completed(bytes) => {
+                // Seule la réponse finale du serveur dit si le transfert a vraiment réussi.
+                source
+                    .finish()
+                    .await
+                    .map_err(|error| failed("le serveur signale un transfert incomplet", error))?;
+                Ok(bytes)
+            }
+            CopyOutcome::Cancelled => {
+                if let Err(error) = self.stream.abort(source).await {
+                    tracing::warn!(%error, "FTP transfer abort was not acknowledged");
+                }
+                drop(target);
+                transfer::discard_partial_local(local).await;
+                Err(FsError::Cancelled)
+            }
+        }
     }
 
-    pub async fn upload(&mut self, local: &Path, remote: &str) -> Result<u64, FsError> {
+    pub async fn upload(
+        &mut self,
+        local: &Path,
+        remote: &str,
+        hooks: TransferHooks<'_>,
+    ) -> Result<u64, FsError> {
         let mut source = tokio::fs::File::open(local)
             .await
             .map_err(|error| failed("lecture du fichier local impossible", error))?;
-        self.stream
-            .put_file(remote, &mut source)
+        let mut target = self
+            .stream
+            .put_with_stream(remote)
             .await
-            .map_err(|error| failed("envoi refusé", error))
+            .map_err(|error| failed("envoi refusé", error))?;
+        let outcome = transfer::copy(&mut source, &mut target, hooks.progress, hooks.cancelled)
+            .await
+            .map_err(|error| failed("transfert interrompu", error))?;
+        match outcome {
+            CopyOutcome::Completed(bytes) => {
+                target
+                    .finish()
+                    .await
+                    .map_err(|error| failed("le serveur signale un envoi incomplet", error))?;
+                Ok(bytes)
+            }
+            CopyOutcome::Cancelled => {
+                if let Err(error) = self.stream.abort(target).await {
+                    tracing::warn!(%error, "FTP upload abort was not acknowledged");
+                }
+                if let Err(error) = self.remove_file(remote).await {
+                    tracing::warn!(%remote, %error, "partial upload could not be removed");
+                }
+                Err(FsError::Cancelled)
+            }
+        }
     }
 
     pub async fn close(mut self) {
