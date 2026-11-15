@@ -45,6 +45,17 @@ impl ConnectionLibrary {
     }
 
     /// Ajoute ou remplace une connexion, et déclare son groupe s'il est nouveau.
+    /// Mémorise (ou oublie) la phrase de passe de la clé privée d'une connexion.
+    pub fn set_key_passphrase(&mut self, id: &str, passphrase: Option<String>) {
+        if let Some(connection) = self
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == id)
+        {
+            connection.key_passphrase = passphrase;
+        }
+    }
+
     pub fn upsert(&mut self, connection: Connection) {
         if let Some(group) = &connection.group {
             self.create_group(group);
@@ -303,6 +314,15 @@ mod tests {
             (web.kind, web.group.as_deref()),
             (ConnectionKind::Ssh, Some("Production"))
         );
+    }
+
+    #[test]
+    fn should_store_a_key_passphrase_apart_from_the_password() {
+        let mut library = library();
+        library.set_key_passphrase("web", Some("phrase".into()));
+        let web = library.find("web").unwrap();
+        assert_eq!(web.key_passphrase.as_deref(), Some("phrase"));
+        assert_eq!(web.password, None);
     }
 
     #[test]

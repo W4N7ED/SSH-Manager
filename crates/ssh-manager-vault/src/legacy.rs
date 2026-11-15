@@ -63,6 +63,9 @@ pub(crate) struct LegacyConnection {
     username: String,
     password: Option<String>,
     private_key_path: Option<String>,
+    /// Absent des fichiers Electron ; transporté par les sauvegardes de la version Rust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_passphrase: Option<String>,
     #[serde(default)]
     ftp_secure: Option<bool>,
     group: Option<String>,
@@ -235,6 +238,7 @@ impl LegacyConnection {
             username: connection.username.clone(),
             password: connection.password.clone(),
             private_key_path: connection.private_key_path.clone(),
+            key_passphrase: connection.key_passphrase.clone(),
             ftp_secure: Some(connection.ftp_secure),
             group: connection.group.clone(),
             favorite: Some(connection.favorite),
@@ -259,6 +263,9 @@ pub(crate) fn convert_connection(legacy: LegacyConnection) -> Connection {
         username: legacy.username,
         password: legacy.password.filter(|password| !password.is_empty()),
         private_key_path: legacy.private_key_path.filter(|path| !path.is_empty()),
+        key_passphrase: legacy
+            .key_passphrase
+            .filter(|passphrase| !passphrase.is_empty()),
         ftp_secure: legacy.ftp_secure.unwrap_or(false),
         group: legacy.group.filter(|group| !group.is_empty()),
         favorite: legacy.favorite.unwrap_or(false),

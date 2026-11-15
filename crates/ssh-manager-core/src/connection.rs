@@ -59,6 +59,9 @@ pub struct Connection {
     /// Chemin d'une clé privée. Prioritaire sur le mot de passe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
+    /// Phrase de passe de la clé privée, si elle est chiffrée et mémorisée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_passphrase: Option<String>,
     /// FTP uniquement : FTPS (TLS explicite).
     #[serde(default)]
     pub ftp_secure: bool,
@@ -88,6 +91,7 @@ impl Connection {
             username: String::new(),
             password: None,
             private_key_path: None,
+            key_passphrase: None,
             ftp_secure: false,
             group: None,
             favorite: false,
