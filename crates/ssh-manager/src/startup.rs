@@ -56,6 +56,13 @@ pub fn determine() -> Start {
         };
     }
 
+    // Une version portable démarre à neuf : elle ne reprend pas le coffre de
+    // l'ancienne application installée sur le poste où on la branche.
+    if paths::is_portable() {
+        tracing::info!(dir = %paths::data_dir().display(), "portable first launch");
+        return Start::NeedsSetup { imported: None };
+    }
+
     let Some(legacy) = LegacyVault::locate(paths::legacy_dir()) else {
         tracing::info!("no vault and no legacy vault found — first launch");
         return Start::NeedsSetup { imported: None };

@@ -1005,11 +1005,16 @@ impl Workspace {
                                 .font(font.clone())
                                 .color(color::TEXT_DIM),
                         );
-                        ui.label(
-                            RichText::new("coffre chiffré")
-                                .font(font)
-                                .color(color::TEXT_DIM),
-                        );
+                        let storage = if ssh_manager_vault::paths::is_portable() {
+                            "portable · coffre chiffré"
+                        } else {
+                            "coffre chiffré"
+                        };
+                        ui.label(RichText::new(storage).font(font).color(color::TEXT_DIM))
+                            .on_hover_text(format!(
+                                "Données : {}",
+                                ssh_manager_vault::paths::data_dir().display()
+                            ));
                     });
                 });
             });

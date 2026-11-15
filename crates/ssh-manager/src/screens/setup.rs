@@ -114,6 +114,15 @@ impl SetupScreen {
                     ui,
                     "Le coffre est protégé par une phrase de récupération de 12 mots. Elle est la seule façon de le rouvrir sur un autre poste.",
                 );
+                if let Some(folder) = ssh_manager_vault::paths::portable_data_dir() {
+                    paragraph(
+                        ui,
+                        &format!(
+                            "Version portable : les données restent à côté de l'application, dans « {} ». Sur un autre PC, la phrase est demandée une seule fois, puis l'ouverture y devient automatique.",
+                            folder.display()
+                        ),
+                    );
+                }
                 if self
                     .imported
                     .as_ref()

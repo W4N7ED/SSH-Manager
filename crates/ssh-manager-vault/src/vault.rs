@@ -4,7 +4,9 @@
 //! ```text
 //! vault.json
 //! ├─ version, salt, verifyHash      en clair : nécessaires pour vérifier la phrase
-//! ├─ protectedKey                    clé du coffre protégée par DPAPI
+//! ├─ protectedKey(s)                 clé du coffre protégée par DPAPI, une
+//! │                                  copie par poste et compte Windows
+//! │                                  (version portable sur clé USB)
 //! └─ nonce, payload                  VaultData chiffré en AES-256-GCM
 //! ```
 
@@ -40,9 +42,22 @@ struct VaultFile {
     version: u32,
     salt: String,
     verify_hash: String,
+    /// Copie protégée pour le dernier poste ayant enregistré (format d'origine).
     protected_key: String,
+    /// Une copie protégée par poste : `utilisateur@POSTE` → blob DPAPI.
+    /// DPAPI lie un blob à un compte d'un poste ; garder celles des autres
+    /// postes évite de redemander la phrase en revenant sur l'un d'eux.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    protected_keys: BTreeMap<String, String>,
     nonce: String,
     payload: String,
+}
+
+/// Identifiant du compte Windows courant, celui auquel DPAPI lie la clé.
+fn machine_account() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let computer = std::env::var("COMPUTERNAME").unwrap_or_default();
+    format!("{user}@{computer}")
 }
 
 /// Coffre ouvert : la clé est en mémoire (effacée à la libération).
@@ -51,6 +66,8 @@ pub struct Vault {
     key: VaultKey,
     salt: Vec<u8>,
     verify_hash: String,
+    /// Clés protégées des autres postes, conservées à chaque enregistrement.
+    other_accounts: BTreeMap<String, String>,
 }
 
 impl Vault {
@@ -64,6 +81,7 @@ impl Vault {
             key,
             salt,
             verify_hash,
+            other_accounts: BTreeMap::new(),
         }
     }
 
@@ -81,6 +99,7 @@ impl Vault {
             key,
             salt,
             verify_hash,
+            other_accounts: BTreeMap::new(),
         }
     }
 
@@ -116,7 +135,14 @@ impl Vault {
     pub fn open(path: impl Into<PathBuf>) -> Result<(Self, VaultData), VaultError> {
         let path = path.into();
         let file = read_file(&path)?;
-        let key = unprotect_key(&file.protected_key)?;
+        // D'abord la copie de ce compte, puis la copie d'origine.
+        let key = file
+            .protected_keys
+            .get(&machine_account())
+            .into_iter()
+            .chain(std::iter::once(&file.protected_key))
+            .find_map(|protected| unprotect_key(protected).ok())
+            .ok_or(VaultError::RecoveryPhraseRequired)?;
         let vault = Self::from_file(path, key, &file)?;
         let data = vault.decrypt(&file)?;
         Ok((vault, data))
@@ -147,11 +173,14 @@ impl Vault {
             return Err(VaultError::UnsupportedVersion(file.version));
         }
         let salt = decode_hex(&file.salt, "sel du coffre")?;
+        let mut other_accounts = file.protected_keys.clone();
+        other_accounts.remove(&machine_account());
         Ok(Self {
             path,
             key,
             salt,
             verify_hash: file.verify_hash.clone(),
+            other_accounts,
         })
     }
 
@@ -170,11 +199,15 @@ impl Vault {
             serde_json::to_vec(data).map_err(|error| VaultError::format(&self.path, error))?,
         );
         let (nonce, payload) = crypto::seal(&self.key, &plaintext);
+        let protected_key = protect_key(&self.key)?;
+        let mut protected_keys = self.other_accounts.clone();
+        protected_keys.insert(machine_account(), protected_key.clone());
         let file = VaultFile {
             version: FORMAT_VERSION,
             salt: crypto::to_hex(&self.salt),
             verify_hash: self.verify_hash.clone(),
-            protected_key: protect_key(&self.key)?,
+            protected_key,
+            protected_keys,
             nonce: BASE64.encode(nonce),
             payload: BASE64.encode(payload),
         };
@@ -300,6 +333,44 @@ mod tests {
         Vault::create(&path, PHRASE).save(&sample_data()).unwrap();
         let result = Vault::open_with_phrase(&path, "abandon abandon abandon");
         assert!(matches!(result, Err(VaultError::WrongRecoveryPhrase)));
+    }
+
+    /// Simule un coffre portable déjà ouvert sur un autre poste : sa copie de
+    /// clé (illisible ici) doit survivre aux enregistrements faits sur ce poste.
+    #[test]
+    fn should_keep_the_protected_keys_of_other_computers() {
+        let path = temp_vault_path("portable");
+        Vault::create(&path, PHRASE).save(&sample_data()).unwrap();
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file["protectedKeys"]["alice@LAPTOP"] = "b3RoZXItcG9zdGU=".into();
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+
+        let (vault, data) = Vault::open(&path).unwrap();
+        vault.save(&data).unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["protectedKeys"]["alice@LAPTOP"], "b3RoZXItcG9zdGU=");
+        assert!(saved["protectedKeys"][machine_account()].is_string());
+    }
+
+    #[test]
+    fn should_ask_for_the_phrase_when_no_copy_belongs_to_this_computer() {
+        let path = temp_vault_path("foreign");
+        Vault::create(&path, PHRASE).save(&sample_data()).unwrap();
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file["protectedKey"] = "aWxsaXNpYmxl".into();
+        file["protectedKeys"] = serde_json::json!({ "bob@DESKTOP": "aWxsaXNpYmxl" });
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        assert!(matches!(
+            Vault::open(&path),
+            Err(VaultError::RecoveryPhraseRequired)
+        ));
+        // La phrase ouvre le coffre et ajoute la copie de ce poste.
+        Vault::open_with_phrase(&path, PHRASE).unwrap();
+        assert!(Vault::open(&path).is_ok());
     }
 
     #[test]

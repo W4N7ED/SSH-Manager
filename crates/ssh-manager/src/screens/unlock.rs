@@ -75,7 +75,7 @@ impl UnlockScreen {
         let (heading, explanation) = match self.purpose {
             PhrasePurpose::UnlockVault => (
                 "Déverrouiller le coffre",
-                "La clé protégée par Windows n'est pas lisible sur ce poste. Saisissez votre phrase de récupération : les lancements suivants seront automatiques.",
+                "Ce coffre n'a encore jamais été ouvert sur ce poste (ou ce compte Windows). Saisissez votre phrase de récupération : les lancements suivants y seront automatiques.",
             ),
             PhrasePurpose::ImportLegacy(_) => (
                 "Importer vos connexions",
