@@ -112,6 +112,37 @@ impl Connection {
         format!("{}:{}", self.host, self.port)
     }
 
+    /// Connexion ponctuelle à partir d'une saisie `user@hôte[:port]`, comme
+    /// dans la barre de recherche. `None` si la saisie n'a pas cette forme.
+    pub fn from_quick_target(text: &str, kind: ConnectionKind, created_at: i64) -> Option<Self> {
+        let text = text.trim();
+        if text.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let (username, address) = text.rsplit_once('@')?;
+        let (host, port) = match address.rsplit_once(':') {
+            // Une adresse IPv6 contient des « : » : on n'y cherche pas de port.
+            Some((host, port)) if !host.contains(':') => {
+                (host, port.parse::<u16>().ok().filter(|port| *port > 0)?)
+            }
+            _ => (address, kind.default_port()),
+        };
+        let valid_host = !host.is_empty()
+            && host
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || ".-_:".contains(character));
+        if username.is_empty() || !valid_host {
+            return None;
+        }
+        let mut connection = Self::new(created_at);
+        connection.kind = kind;
+        connection.name = format!("{username}@{host}");
+        connection.host = host.to_owned();
+        connection.port = port;
+        connection.username = username.to_owned();
+        Some(connection)
+    }
+
     /// Vérifie les champs obligatoires. Renvoie la liste des problèmes, vide si valide.
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
@@ -148,6 +179,52 @@ impl ValidationError {
             Self::MissingUsername => "Le nom d'utilisateur est requis",
             Self::InvalidPort => "Port invalide (1–65535)",
         }
+    }
+}
+
+#[cfg(test)]
+mod quick_target_tests {
+    use super::*;
+
+    fn parse(text: &str) -> Option<Connection> {
+        Connection::from_quick_target(text, ConnectionKind::Ssh, 0)
+    }
+
+    #[test]
+    fn should_parse_user_host_and_port() {
+        let connection = parse("deploy@10.0.0.5:2222").unwrap();
+        assert_eq!(
+            (
+                connection.username.as_str(),
+                connection.host.as_str(),
+                connection.port
+            ),
+            ("deploy", "10.0.0.5", 2222)
+        );
+        assert_eq!(connection.name, "deploy@10.0.0.5");
+    }
+
+    #[test]
+    fn should_use_the_protocol_default_port_when_omitted() {
+        let connection =
+            Connection::from_quick_target("anon@ftp.example.org", ConnectionKind::Ftp, 0).unwrap();
+        assert_eq!(connection.port, 21);
+        assert_eq!(connection.kind, ConnectionKind::Ftp);
+    }
+
+    #[test]
+    fn should_keep_an_ipv6_address_whole() {
+        assert_eq!(parse("root@fe80::1").unwrap().host, "fe80::1");
+    }
+
+    #[test]
+    fn should_ignore_plain_search_text() {
+        assert!(parse("prod web").is_none());
+        assert!(parse("web-01").is_none());
+        assert!(parse("@host").is_none());
+        assert!(parse("user@").is_none());
+        assert!(parse("user@host:99999").is_none());
+        assert!(parse("user@host/../x").is_none());
     }
 }
 
