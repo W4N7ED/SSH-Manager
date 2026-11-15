@@ -14,6 +14,7 @@
 //! Windows, sur la même machine. Sur une autre machine (version portable,
 //! profil restauré), DPAPI échoue et la phrase est demandée.
 
+pub mod backup;
 pub mod crypto;
 pub mod error;
 pub mod legacy;

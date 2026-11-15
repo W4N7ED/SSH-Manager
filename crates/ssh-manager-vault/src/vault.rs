@@ -88,6 +88,22 @@ impl Vault {
         &self.path
     }
 
+    /// Sauvegarde `.enc` de `data`, restaurable ailleurs avec la phrase de 12 mots.
+    pub fn export_backup(&self, data: &VaultData) -> String {
+        crate::backup::export_encrypted(data, &self.key, &self.salt)
+    }
+
+    /// Ouvre une sauvegarde faite par ce même coffre, sans redemander la
+    /// phrase. `None` si elle vient d'un autre coffre (la phrase est alors requise).
+    pub fn open_own_backup(
+        &self,
+        backup: &crate::backup::EncryptedBackup,
+    ) -> Option<Result<VaultData, VaultError>> {
+        backup
+            .has_salt(&self.salt)
+            .then(|| backup.open_with_key(&self.key))
+    }
+
     /// Clé des enregistrements de session, dérivée de la clé du coffre : les
     /// enregistrements ne sont lisibles qu'une fois le coffre ouvert.
     pub fn recording_key(&self) -> VaultKey {

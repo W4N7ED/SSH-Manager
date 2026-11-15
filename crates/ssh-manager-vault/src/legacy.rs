@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use aes::Aes256;
 use cbc::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha512;
 use ssh_manager_core::{Connection, ConnectionKind, ConnectionLibrary};
 use zeroize::Zeroizing;
@@ -46,9 +46,11 @@ struct LegacyMeta {
     host_keys: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Une connexion au format de l'application Electron. Sert aussi aux
+/// sauvegardes `.enc`, pour qu'elles restent lisibles par les deux applications.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LegacyConnection {
+pub(crate) struct LegacyConnection {
     id: String,
     #[serde(default)]
     name: String,
@@ -222,7 +224,28 @@ fn build_library(connections: Vec<LegacyConnection>) -> ConnectionLibrary {
     library
 }
 
-fn convert_connection(legacy: LegacyConnection) -> Connection {
+impl LegacyConnection {
+    pub(crate) fn from_connection(connection: &Connection) -> Self {
+        Self {
+            id: connection.id.clone(),
+            name: connection.name.clone(),
+            kind: connection.kind,
+            host: connection.host.clone(),
+            port: Some(connection.port),
+            username: connection.username.clone(),
+            password: connection.password.clone(),
+            private_key_path: connection.private_key_path.clone(),
+            ftp_secure: Some(connection.ftp_secure),
+            group: connection.group.clone(),
+            favorite: Some(connection.favorite),
+            color: connection.color.clone(),
+            created_at: Some(connection.created_at as f64),
+            last_used_at: connection.last_used_at.map(|value| value as f64),
+        }
+    }
+}
+
+pub(crate) fn convert_connection(legacy: LegacyConnection) -> Connection {
     Connection {
         id: legacy.id,
         name: if legacy.name.is_empty() {
