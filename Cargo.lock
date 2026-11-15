@@ -4685,6 +4685,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "futures",
  "rand",
  "rfd",
  "russh",

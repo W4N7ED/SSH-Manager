@@ -37,5 +37,9 @@ zeroize.workspace            = true
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
+[dev-dependencies]
+# Flux de connexions pour le serveur d'agent SSH des tests (déjà tiré par russh).
+futures = "0.3.34"
+
 [build-dependencies]
 winresource.workspace = true

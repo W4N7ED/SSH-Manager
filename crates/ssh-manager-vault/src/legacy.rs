@@ -67,6 +67,8 @@ pub(crate) struct LegacyConnection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_passphrase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    use_agent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     jump_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     local_forwards: Vec<ssh_manager_core::LocalForward>,
@@ -243,6 +245,7 @@ impl LegacyConnection {
             password: connection.password.clone(),
             private_key_path: connection.private_key_path.clone(),
             key_passphrase: connection.key_passphrase.clone(),
+            use_agent: connection.use_agent.then_some(true),
             jump_connection_id: connection.jump_connection_id.clone(),
             local_forwards: connection.local_forwards.clone(),
             ftp_secure: Some(connection.ftp_secure),
@@ -272,6 +275,7 @@ pub(crate) fn convert_connection(legacy: LegacyConnection) -> Connection {
         key_passphrase: legacy
             .key_passphrase
             .filter(|passphrase| !passphrase.is_empty()),
+        use_agent: legacy.use_agent.unwrap_or(false),
         jump_connection_id: legacy.jump_connection_id,
         local_forwards: legacy.local_forwards,
         ftp_secure: legacy.ftp_secure.unwrap_or(false),

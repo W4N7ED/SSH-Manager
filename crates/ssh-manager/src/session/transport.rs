@@ -6,12 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client::{self, Handle};
+use russh::keys::agent::client::AgentClient;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use ssh_manager_core::Connection;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::private_key::{self, KeyLoadError};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Tube nommé du service « OpenSSH Authentication Agent » de Windows.
+const OPENSSH_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 /// Message de maintien : évite qu'un pare-feu ferme une session inactive.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -33,6 +37,8 @@ pub enum SessionError {
     KeyPassphrase { wrong: bool },
     #[error("connexion impossible : {0}")]
     Connect(String),
+    #[error("agent SSH : {0}")]
+    Agent(String),
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +255,7 @@ pub async fn open(
     })
 }
 
-async fn connect_direct(
+pub(crate) async fn connect_direct(
     connection: &Connection,
     pinned: Option<String>,
     status: &SharedStatus,
@@ -308,7 +314,64 @@ fn settle(
     }
 }
 
+/// Authentifie par l'agent du poste : celui d'OpenSSH (Windows) d'abord,
+/// puis Pageant (PuTTY).
+async fn authenticate_with_system_agent(
+    handle: &mut SshHandle,
+    connection: &Connection,
+) -> Result<(), SessionError> {
+    if let Ok(mut agent) = AgentClient::connect_named_pipe(OPENSSH_AGENT_PIPE).await {
+        tracing::debug!("using the OpenSSH agent");
+        return authenticate_with_agent(handle, &connection.username, &mut agent).await;
+    }
+    if let Ok(mut agent) = AgentClient::connect_pageant().await {
+        tracing::debug!("using Pageant");
+        return authenticate_with_agent(handle, &connection.username, &mut agent).await;
+    }
+    Err(SessionError::Agent(
+        "aucun agent en cours d'exécution (service « OpenSSH Authentication Agent » ou Pageant)"
+            .into(),
+    ))
+}
+
+/// Essaie chaque clé de l'agent jusqu'à ce que le serveur en accepte une.
+pub(crate) async fn authenticate_with_agent<R>(
+    handle: &mut SshHandle,
+    user: &str,
+    agent: &mut AgentClient<R>,
+) -> Result<(), SessionError>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(|error| SessionError::Agent(error.to_string()))?;
+    if identities.is_empty() {
+        return Err(SessionError::Agent("l'agent ne contient aucune clé".into()));
+    }
+    let hash = handle
+        .best_supported_rsa_hash()
+        .await
+        .map_err(network)?
+        .flatten();
+    for identity in identities {
+        let key = identity.public_key().into_owned();
+        let result = handle
+            .authenticate_publickey_with(user.to_owned(), key, hash, agent)
+            .await
+            .map_err(|error| SessionError::Agent(error.to_string()))?;
+        if result.success() {
+            return Ok(());
+        }
+    }
+    Err(SessionError::Authentication)
+}
+
 async fn authenticate(handle: &mut SshHandle, connection: &Connection) -> Result<(), SessionError> {
+    if connection.use_agent {
+        return authenticate_with_system_agent(handle, connection).await;
+    }
     let accepted = match &connection.private_key_path {
         Some(path) => {
             let key = private_key::load(

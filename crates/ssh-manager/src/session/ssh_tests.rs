@@ -443,6 +443,51 @@ fn free_port(runtime: &Runtime) -> u16 {
         .port()
 }
 
+/// Agent SSH de test sur un tube en mémoire, chargé avec `keys`.
+async fn test_agent(
+    keys: &[PrivateKey],
+) -> russh::keys::agent::client::AgentClient<tokio::io::DuplexStream> {
+    let (client_side, agent_side) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(russh::keys::agent::server::serve(
+        futures::stream::iter(vec![Ok(agent_side)]),
+        (),
+    ));
+    let mut agent = russh::keys::agent::client::AgentClient::connect(client_side);
+    for key in keys {
+        agent.add_identity(key, &[]).await.unwrap();
+    }
+    agent
+}
+
+fn authenticate_through_agent(keys: Vec<PrivateKey>) -> Result<(), SessionError> {
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    runtime.block_on(async {
+        let mut agent = test_agent(&keys).await;
+        let status = super::transport::SharedStatus::new(egui::Context::default());
+        let target = connection(server.port, PASSWORD);
+        let mut handle =
+            super::transport::connect_direct(&target, Some(server.fingerprint.clone()), &status)
+                .await?;
+        super::transport::authenticate_with_agent(&mut handle, USER, &mut agent).await
+    })
+}
+
+#[test]
+fn should_authenticate_with_a_key_held_by_the_agent() {
+    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+    assert!(authenticate_through_agent(vec![key]).is_ok());
+}
+
+#[test]
+fn should_report_an_empty_agent() {
+    let result = authenticate_through_agent(Vec::new());
+    assert!(
+        matches!(&result, Err(SessionError::Agent(message)) if message.contains("aucune clé")),
+        "{result:?}"
+    );
+}
+
 #[test]
 fn should_relay_a_local_tunnel_to_its_destination() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

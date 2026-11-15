@@ -82,6 +82,10 @@ pub struct Connection {
     /// Phrase de passe de la clé privée, si elle est chiffrée et mémorisée.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_passphrase: Option<String>,
+    /// Authentification par l'agent SSH du poste (OpenSSH de Windows ou
+    /// Pageant) : les clés restent dans l'agent, l'app ne les lit jamais.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_agent: bool,
     /// Connexion SSH enregistrée par laquelle passer pour joindre ce serveur
     /// (rebond, `ProxyJump`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +123,7 @@ impl Connection {
             password: None,
             private_key_path: None,
             key_passphrase: None,
+            use_agent: false,
             jump_connection_id: None,
             local_forwards: Vec::new(),
             ftp_secure: false,
@@ -137,7 +142,7 @@ impl Connection {
 
     /// Vrai si l'ouverture d'une session devra demander un mot de passe.
     pub fn needs_password_prompt(&self) -> bool {
-        self.private_key_path.is_none() && self.password.is_none()
+        !self.use_agent && self.private_key_path.is_none() && self.password.is_none()
     }
 
     /// Identifiant d'épinglage de la clé d'hôte, identique à celui de l'app Electron.
@@ -295,6 +300,17 @@ mod tests {
     fn should_not_prompt_when_a_private_key_is_set() {
         let connection = Connection {
             private_key_path: Some("C:/id_ed25519".into()),
+            ..sample()
+        };
+        assert!(!connection.needs_password_prompt());
+    }
+
+    #[test]
+    fn should_not_prompt_when_the_ssh_agent_is_used() {
+        let connection = Connection {
+            password: None,
+            private_key_path: None,
+            use_agent: true,
             ..sample()
         };
         assert!(!connection.needs_password_prompt());

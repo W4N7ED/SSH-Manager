@@ -16,6 +16,8 @@ const NO_GROUP: &str = "Sans groupe";
 enum Authentication {
     PrivateKey,
     Password,
+    /// Clés détenues par l'agent SSH du poste.
+    Agent,
 }
 
 pub enum FormResult {
@@ -38,7 +40,9 @@ pub struct ConnectionForm {
 
 impl ConnectionForm {
     pub fn new(connection: Connection, editing: bool) -> Self {
-        let authentication = if connection.private_key_path.is_some() {
+        let authentication = if connection.use_agent {
+            Authentication::Agent
+        } else if connection.private_key_path.is_some() {
             Authentication::PrivateKey
         } else {
             Authentication::Password
@@ -219,11 +223,19 @@ impl ConnectionForm {
             &[
                 (Authentication::PrivateKey, "Clé privée"),
                 (Authentication::Password, "Mot de passe"),
+                (Authentication::Agent, "Agent SSH"),
             ],
             &mut self.authentication,
         );
         ui.add_space(6.0);
         match self.authentication {
+            Authentication::Agent => {
+                ui.label(
+                    RichText::new("Les clés chargées dans l'agent du poste sont proposées au serveur : service Windows « OpenSSH Authentication Agent » (ssh-add) ou Pageant. L'application ne lit jamais ces clés.")
+                        .font(theme::sans(12.0))
+                        .color(color::TEXT_MUTED),
+                );
+            }
             Authentication::Password => {
                 ui.add(
                     widgets::text_field(
@@ -338,18 +350,21 @@ impl ConnectionForm {
             Authentication::Password => {
                 Some(self.password_text.clone()).filter(|password| !password.is_empty())
             }
-            Authentication::PrivateKey => None,
+            Authentication::PrivateKey | Authentication::Agent => None,
         };
         connection.key_passphrase = match self.authentication {
             Authentication::PrivateKey => {
                 Some(self.passphrase_text.clone()).filter(|passphrase| !passphrase.is_empty())
             }
-            Authentication::Password => None,
+            Authentication::Password | Authentication::Agent => None,
         };
-        if self.authentication == Authentication::Password || connection.kind == ConnectionKind::Ftp
+        if self.authentication != Authentication::PrivateKey
+            || connection.kind == ConnectionKind::Ftp
         {
             connection.private_key_path = None;
         }
+        connection.use_agent =
+            self.authentication == Authentication::Agent && connection.kind != ConnectionKind::Ftp;
         if connection.kind != ConnectionKind::Ftp {
             connection.ftp_secure = false;
         }

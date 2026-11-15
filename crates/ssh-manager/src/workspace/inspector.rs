@@ -56,6 +56,7 @@ pub fn show(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
             ui.add_space(12.0);
 
             let authentication = match (&connection.private_key_path, &connection.password) {
+                _ if connection.use_agent => "Agent SSH",
                 (Some(_), _) => "Clé privée",
                 (None, Some(_)) => "Mot de passe enregistré",
                 (None, None) => "Mot de passe demandé",
