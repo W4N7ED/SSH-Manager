@@ -54,7 +54,17 @@ windows = { version = "0.62.2", features = [
 
 # Application
 chrono             = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-eframe             = "0.37.0"
+# Rendu OpenGL (glow) seul, sans wgpu (Vulkan/DX12) : même affichage, mais
+# 76 Mo de mémoire privée au lieu de 409 Mo sur l'écran d'accueil, et un
+# exécutable de 17,8 Mo au lieu de 24,3 Mo.
+eframe             = { version = "0.37.0", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "system_fonts",
+] }
 egui               = "0.37.0"
 rfd                = "0.18.0"
 tokio              = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }

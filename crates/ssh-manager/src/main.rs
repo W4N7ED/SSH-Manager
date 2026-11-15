@@ -26,9 +26,9 @@ use std::sync::Mutex;
 
 use ssh_manager_vault::paths;
 
-/// Filtre par défaut : nos évènements dès `info`, le moteur graphique (wgpu)
-/// seulement en cas d'erreur — il journalise abondamment ses détails internes.
-const DEFAULT_LOG_FILTER: &str = "info,wgpu_hal=error,wgpu_core=error,egui_wgpu=warn,naga=warn";
+/// Filtre par défaut : nos évènements dès `info`, le moteur graphique
+/// seulement à partir des avertissements — il détaille ses rouages internes.
+const DEFAULT_LOG_FILTER: &str = "info,egui_glow=warn,glutin=warn";
 
 /// Journal structuré (JSON, une ligne par évènement) dans le dossier de l'app.
 /// Niveau réglable par la variable `SSH_MANAGER_LOG`.
@@ -88,6 +88,7 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport,
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
