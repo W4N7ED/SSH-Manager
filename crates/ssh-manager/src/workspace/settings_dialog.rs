@@ -151,6 +151,14 @@ fn backup_section(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if widgets::secondary_button(ui, "Importer…").clicked() {
             actions.push(Action::ImportBackup);
         }
+        if widgets::secondary_button(ui, "Importer ~/.ssh/config")
+            .on_hover_text(
+                "Une connexion par bloc Host (HostName, User, Port, IdentityFile, ProxyJump, LocalForward)",
+            )
+            .clicked()
+        {
+            actions.push(Action::ImportSshConfig);
+        }
         let plain = egui::Button::new(
             RichText::new("Exporter en clair (.json)")
                 .font(theme::sans(12.0))

@@ -13,6 +13,7 @@ use tokio::runtime::Runtime;
 
 use super::emulator::GridSize;
 use super::ssh::{SessionError, SessionState, SshSession, TerminalBuffers, lock};
+use super::transport::{JumpHop, LearnedHostKey, Route};
 use crate::recordings::Recorder;
 
 const USER: &str = "tester";
@@ -28,6 +29,10 @@ type ReceivedSizes = Arc<Mutex<Vec<(u32, u32)>>>;
 #[derive(Clone)]
 struct EchoShell {
     sizes: ReceivedSizes,
+    /// Canaux de shell de cette connexion : seuls ceux-là sont en écho ; les
+    /// canaux de rebond et de tunnel relaient leurs octets tels quels.
+    /// Propre à chaque connexion (copié vide pour chaque client).
+    shells: std::collections::HashSet<ChannelId>,
 }
 
 impl server::Handler for EchoShell {
@@ -55,12 +60,36 @@ impl server::Handler for EchoShell {
         })
     }
 
-    async fn channel_open_session(
+    /// Rebond et tunnels : le serveur relaie le canal vers la destination,
+    /// comme `AllowTcpForwarding yes` d'OpenSSH.
+    async fn channel_open_direct_tcpip(
         &mut self,
-        _channel: Channel<Msg>,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        let destination = (host_to_connect.to_owned(), port_to_connect as u16);
+        reply.accept().await;
+        tokio::spawn(async move {
+            if let Ok(mut target) = tokio::net::TcpStream::connect(destination).await {
+                let mut stream = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut stream, &mut target).await;
+            }
+        });
+        Ok(())
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.shells.insert(channel.id());
         reply.accept().await;
         Ok(())
     }
@@ -95,6 +124,9 @@ impl server::Handler for EchoShell {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if !self.shells.contains(&channel) {
+            return Ok(());
+        }
         // « exit » : le shell se termine, comme après un délai d'inactivité côté serveur.
         if data == b"exit\r" {
             session.exit_status_request(channel, 0)?;
@@ -144,6 +176,7 @@ fn start_server(runtime: &Runtime) -> TestServer {
 
     let handler = EchoShell {
         sizes: sizes.clone(),
+        shells: std::collections::HashSet::new(),
     };
     runtime.spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
@@ -197,7 +230,7 @@ fn should_connect_pin_the_host_key_and_relay_bytes() {
         &runtime,
         egui::Context::default(),
         connection(server.port, PASSWORD),
-        None,
+        Route::direct(None),
         TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
 
@@ -205,13 +238,15 @@ fn should_connect_pin_the_host_key_and_relay_bytes() {
         matches!(session.state(), SessionState::Connected)
     });
     assert_eq!(
-        session.take_learned_host_key(),
-        Some(server.fingerprint.clone()),
+        session.take_learned_host_keys(),
+        [LearnedHostKey {
+            host: format!("127.0.0.1:{}", server.port),
+            fingerprint: server.fingerprint.clone()
+        }],
         "empreinte à épingler"
     );
-    assert_eq!(
-        session.take_learned_host_key(),
-        None,
+    assert!(
+        session.take_learned_host_keys().is_empty(),
         "empreinte livrée une seule fois"
     );
 
@@ -242,7 +277,7 @@ fn should_keep_the_screen_after_the_shell_ends_and_reconnect_into_it() {
         &runtime,
         egui::Context::default(),
         connection(server.port, PASSWORD),
-        Some(server.fingerprint.clone()),
+        Route::direct(Some(server.fingerprint.clone())),
         buffers.clone(),
     );
     wait_until("message d'accueil", || screen_contains(&first, "welcome"));
@@ -271,7 +306,7 @@ fn should_keep_the_screen_after_the_shell_ends_and_reconnect_into_it() {
         &runtime,
         egui::Context::default(),
         connection(server.port, PASSWORD),
-        Some(server.fingerprint.clone()),
+        Route::direct(Some(server.fingerprint.clone())),
         buffers,
     );
     wait_until("reconnexion", || {
@@ -326,7 +361,7 @@ fn should_record_what_the_server_displays() {
         &runtime,
         egui::Context::default(),
         target,
-        Some(server.fingerprint.clone()),
+        Route::direct(Some(server.fingerprint.clone())),
         TerminalBuffers::new(SIZE, recorder),
     );
     wait_until("message d'accueil", || screen_contains(&session, "welcome"));
@@ -369,13 +404,115 @@ fn key_connection(port: u16, key: &std::path::Path, passphrase: Option<&str>) ->
 }
 
 fn start_terminal(runtime: &Runtime, connection: Connection, pinned: String) -> SshSession {
+    start_routed(runtime, connection, Route::direct(Some(pinned)))
+}
+
+fn start_routed(runtime: &Runtime, connection: Connection, route: Route) -> SshSession {
     SshSession::start(
         runtime,
         egui::Context::default(),
         connection,
-        Some(pinned),
+        route,
         TerminalBuffers::new(SIZE, Recorder::disabled()),
     )
+}
+
+/// Serveur TCP d'écho : la destination des tunnels dans les tests.
+fn start_echo_service(runtime: &Runtime) -> u16 {
+    let listener = runtime
+        .block_on(TcpListener::bind("127.0.0.1:0"))
+        .expect("port local libre");
+    let port = listener.local_addr().unwrap().port();
+    runtime.spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (mut reader, mut writer) = socket.split();
+                let _ = tokio::io::copy(&mut reader, &mut writer).await;
+            });
+        }
+    });
+    port
+}
+
+fn free_port(runtime: &Runtime) -> u16 {
+    runtime
+        .block_on(TcpListener::bind("127.0.0.1:0"))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn should_relay_a_local_tunnel_to_its_destination() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    let echo_port = start_echo_service(&runtime);
+    let local_port = free_port(&runtime);
+    let mut target = connection(server.port, PASSWORD);
+    target.local_forwards = vec![ssh_manager_core::LocalForward {
+        local_port,
+        remote_host: "127.0.0.1".into(),
+        remote_port: echo_port,
+    }];
+    let session = start_terminal(&runtime, target, server.fingerprint.clone());
+    wait_until("tunnel ouvert", || {
+        session
+            .tunnels()
+            .first()
+            .is_some_and(|tunnel| tunnel.state == super::tunnels::TunnelState::Listening)
+    });
+
+    let reply = runtime.block_on(async {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", local_port))
+            .await
+            .unwrap();
+        socket.write_all(b"ping par le tunnel").await.unwrap();
+        let mut buffer = vec![0u8; 18];
+        socket.read_exact(&mut buffer).await.unwrap();
+        buffer
+    });
+    assert_eq!(reply, b"ping par le tunnel");
+    assert_eq!(session.tunnels()[0].connections, 1);
+}
+
+#[test]
+fn should_reach_the_target_through_a_jump_host() {
+    let runtime = Runtime::new().unwrap();
+    let jump_server = start_server(&runtime);
+    let target_server = start_server(&runtime);
+    let jump = JumpHop {
+        connection: connection(jump_server.port, PASSWORD),
+        pinned: None,
+    };
+    let route = Route {
+        pinned: None,
+        jump: Some(jump),
+    };
+    let session = start_routed(&runtime, connection(target_server.port, PASSWORD), route);
+    wait_until("connexion par le rebond", || {
+        let state = session.state();
+        assert!(
+            !matches!(state, SessionState::Failed(_)),
+            "échec : {state:?}"
+        );
+        matches!(state, SessionState::Connected)
+    });
+    wait_until("message d'accueil", || screen_contains(&session, "welcome"));
+    let mut learned: Vec<String> = session
+        .take_learned_host_keys()
+        .into_iter()
+        .map(|key| key.host)
+        .collect();
+    learned.sort();
+    let mut expected = vec![
+        format!("127.0.0.1:{}", jump_server.port),
+        format!("127.0.0.1:{}", target_server.port),
+    ];
+    expected.sort();
+    assert_eq!(learned, expected, "les deux serveurs sont épinglés");
 }
 
 #[test]
@@ -425,13 +562,13 @@ fn should_accept_the_pinned_host_key_without_learning_it_again() {
         &runtime,
         egui::Context::default(),
         connection(server.port, PASSWORD),
-        Some(server.fingerprint.clone()),
+        Route::direct(Some(server.fingerprint.clone())),
         TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
     wait_until("connexion établie", || {
         matches!(session.state(), SessionState::Connected)
     });
-    assert_eq!(session.take_learned_host_key(), None);
+    assert!(session.take_learned_host_keys().is_empty());
 }
 
 #[test]
@@ -443,7 +580,7 @@ fn should_refuse_a_server_whose_host_key_changed() {
         &runtime,
         egui::Context::default(),
         connection(server.port, PASSWORD),
-        Some(pinned.clone()),
+        Route::direct(Some(pinned.clone())),
         TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
 
@@ -451,7 +588,12 @@ fn should_refuse_a_server_whose_host_key_changed() {
         matches!(session.state(), SessionState::Failed(_))
     });
     match session.state() {
-        SessionState::Failed(SessionError::HostKeyChanged { known, received }) => {
+        SessionState::Failed(SessionError::HostKeyChanged {
+            host,
+            known,
+            received,
+        }) => {
+            assert_eq!(host, format!("127.0.0.1:{}", server.port));
             assert_eq!(known, pinned);
             assert_eq!(received, server.fingerprint);
         }
@@ -467,7 +609,7 @@ fn should_report_a_rejected_password() {
         &runtime,
         egui::Context::default(),
         connection(server.port, "mauvais"),
-        None,
+        Route::direct(None),
         TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
     wait_until("échec d'authentification", || {
@@ -493,7 +635,7 @@ fn should_report_an_unreachable_server() {
         &runtime,
         egui::Context::default(),
         connection(port, PASSWORD),
-        None,
+        Route::direct(None),
         TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
     wait_until("échec de connexion", || {

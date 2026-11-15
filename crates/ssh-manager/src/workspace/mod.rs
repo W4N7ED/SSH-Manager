@@ -6,6 +6,7 @@ mod backup_dialogs;
 mod backup_flow;
 mod command_palette;
 mod form;
+mod form_network;
 mod inspector;
 mod key_generator;
 mod lifecycle;
@@ -260,6 +261,7 @@ impl Workspace {
             && let Some(result) = form.show(
                 ctx,
                 &self.data.library.groups,
+                &self.data.library.connections,
                 &mut self.clipboard,
                 &self.settings,
             )
@@ -385,8 +387,9 @@ impl Workspace {
             }
             Action::TrustHostKey {
                 session,
+                host,
                 fingerprint,
-            } => self.trust_host_key(session, fingerprint),
+            } => self.trust_host_key(session, host, fingerprint),
             other => self.apply_interface(other),
         }
     }
@@ -400,6 +403,7 @@ impl Workspace {
             Action::ExportBackup { plain: false } => self.export_backup(false),
             Action::ExportBackup { plain: true } => self.confirm_plain_export = true,
             Action::ImportBackup => self.import_backup(),
+            Action::ImportSshConfig => self.import_ssh_config(),
             Action::ToggleMosaic => self.toggle_mosaic(),
             Action::PlaceInMosaic { session, slot } => {
                 self.mosaic.place(session, slot);

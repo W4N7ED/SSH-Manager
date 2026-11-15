@@ -374,7 +374,11 @@ fn connect(runtime: &Runtime, port: u16) -> Backend {
     };
     let status = SharedStatus::new(egui::Context::default());
     runtime
-        .block_on(Backend::connect(&connection, None, &status))
+        .block_on(Backend::connect(
+            &connection,
+            &crate::session::transport::Route::default(),
+            &status,
+        ))
         .expect("connexion SFTP")
 }
 

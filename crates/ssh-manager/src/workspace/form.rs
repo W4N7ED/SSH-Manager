@@ -3,6 +3,7 @@
 use egui::{CornerRadius, Frame, Margin, RichText, Ui};
 use ssh_manager_core::{Connection, ConnectionKind};
 
+use super::form_network::{self, TunnelDraft};
 use super::key_generator::{KeyGenerator, KeyGeneratorEvent};
 use crate::secure_copy::SecureClipboard;
 use crate::settings::Settings;
@@ -32,6 +33,7 @@ pub struct ConnectionForm {
     new_group: String,
     errors: Vec<&'static str>,
     key_generator: Option<KeyGenerator>,
+    tunnels: Vec<TunnelDraft>,
 }
 
 impl ConnectionForm {
@@ -49,6 +51,11 @@ impl ConnectionForm {
             new_group: String::new(),
             errors: Vec::new(),
             key_generator: None,
+            tunnels: connection
+                .local_forwards
+                .iter()
+                .map(TunnelDraft::from_forward)
+                .collect(),
             connection,
             editing,
         }
@@ -59,6 +66,7 @@ impl ConnectionForm {
         &mut self,
         ctx: &egui::Context,
         groups: &[String],
+        connections: &[Connection],
         clipboard: &mut SecureClipboard,
         settings: &Settings,
     ) -> Option<FormResult> {
@@ -74,7 +82,7 @@ impl ConnectionForm {
             )
             .show(ctx, |ui| {
                 ui.set_width(520.0);
-                result = self.body(ui, groups, clipboard, settings);
+                result = self.body(ui, groups, connections, clipboard, settings);
             });
         if modal.should_close() && result.is_none() {
             result = Some(FormResult::Cancelled);
@@ -86,6 +94,7 @@ impl ConnectionForm {
         &mut self,
         ui: &mut Ui,
         groups: &[String],
+        connections: &[Connection],
         clipboard: &mut SecureClipboard,
         settings: &Settings,
     ) -> Option<FormResult> {
@@ -148,6 +157,7 @@ impl ConnectionForm {
 
         self.authentication_fields(ui, clipboard, settings);
         ui.add_space(4.0);
+        form_network::show(ui, &mut self.connection, connections, &mut self.tunnels);
         ui.checkbox(&mut self.connection.favorite, "Ajouter aux favoris");
 
         for error in &self.errors {
@@ -343,12 +353,23 @@ impl ConnectionForm {
         if connection.kind != ConnectionKind::Ftp {
             connection.ftp_secure = false;
         }
+        let tunnels = form_network::parse_tunnels(&self.tunnels);
+        connection.local_forwards = match (&tunnels, connection.kind) {
+            (Ok(tunnels), ConnectionKind::Ssh) => tunnels.clone(),
+            _ => Vec::new(),
+        };
+        if connection.kind == ConnectionKind::Ftp {
+            connection.jump_connection_id = None;
+        }
 
         self.errors = connection
             .validate()
             .into_iter()
             .map(|error| error.message())
             .collect();
+        if let Err(error) = tunnels {
+            self.errors.push(error);
+        }
         if self.authentication == Authentication::PrivateKey
             && connection.kind != ConnectionKind::Ftp
             && connection.private_key_path.is_none()

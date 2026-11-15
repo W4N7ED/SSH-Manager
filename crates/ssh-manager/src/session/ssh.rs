@@ -9,8 +9,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::emulator::{Emulator, GridSize};
-use super::transport::{self, SharedStatus, network};
+use super::transport::{self, LearnedHostKey, Route, SharedStatus, network};
 pub use super::transport::{SessionError, SessionState, lock};
+use super::tunnels::{self, SharedTunnels, TunnelStatus};
 use crate::recordings::Recorder;
 
 const TERMINAL_TYPE: &str = "xterm-256color";
@@ -65,16 +66,17 @@ pub struct SshSession {
     pub emulator: Arc<Mutex<Emulator>>,
     status: SharedStatus,
     input: UnboundedSender<Input>,
+    tunnels: SharedTunnels,
 }
 
 impl SshSession {
     /// Lance la connexion sur `runtime`, en affichant dans `buffers`.
-    /// `pinned_host_key` est l'empreinte déjà épinglée pour ce serveur, s'il y en a une.
+    /// `route` porte l'empreinte épinglée du serveur et le rebond éventuel.
     pub fn start(
         runtime: &Runtime,
         ctx: egui::Context,
         connection: Connection,
-        pinned_host_key: Option<String>,
+        route: Route,
         buffers: TerminalBuffers,
     ) -> Self {
         let (responses_tx, responses_rx) = unbounded_channel();
@@ -88,12 +90,14 @@ impl SshSession {
             emulator: buffers.emulator.clone(),
             status: SharedStatus::new(ctx),
             input: input_tx,
+            tunnels: SharedTunnels::default(),
         };
         let task = Task {
             status: session.status.clone(),
             buffers,
+            tunnels: session.tunnels.clone(),
         };
-        runtime.spawn(task.run(connection, pinned_host_key, size, input_rx, responses_rx));
+        runtime.spawn(task.run(connection, route, size, input_rx, responses_rx));
         session
     }
 
@@ -101,9 +105,14 @@ impl SshSession {
         self.status.state()
     }
 
-    /// Empreinte découverte à la première connexion ; renvoyée une seule fois.
-    pub fn take_learned_host_key(&self) -> Option<String> {
-        self.status.take_learned_host_key()
+    /// Empreintes découvertes (cible et rebond) ; chacune renvoyée une seule fois.
+    pub fn take_learned_host_keys(&self) -> Vec<LearnedHostKey> {
+        self.status.take_learned_host_keys()
+    }
+
+    /// État des tunnels locaux, vide s'il n'y en a pas ou hors connexion.
+    pub fn tunnels(&self) -> Vec<TunnelStatus> {
+        lock(&self.tunnels).clone()
     }
 
     pub fn send(&self, bytes: Vec<u8>) {
@@ -129,13 +138,14 @@ impl Drop for SshSession {
 struct Task {
     status: SharedStatus,
     buffers: TerminalBuffers,
+    tunnels: SharedTunnels,
 }
 
 impl Task {
     async fn run(
         self,
         connection: Connection,
-        pinned: Option<String>,
+        route: Route,
         size: GridSize,
         input: UnboundedReceiver<Input>,
         responses: UnboundedReceiver<Vec<u8>>,
@@ -143,7 +153,7 @@ impl Task {
         let target = connection.target();
         tracing::info!(%target, "ssh session connecting");
         match self
-            .connect_and_relay(&connection, pinned, size, input, responses)
+            .connect_and_relay(&connection, &route, size, input, responses)
             .await
         {
             Ok(end) => {
@@ -168,12 +178,13 @@ impl Task {
     async fn connect_and_relay(
         &self,
         connection: &Connection,
-        pinned: Option<String>,
+        route: &Route,
         size: GridSize,
         input: UnboundedReceiver<Input>,
         responses: UnboundedReceiver<Vec<u8>>,
     ) -> Result<SessionEnd, SessionError> {
-        let handle = transport::open(connection, pinned, &self.status).await?;
+        let link = transport::open(connection, route, &self.status).await?;
+        let handle = &link.handle;
         let channel = handle.channel_open_session().await.map_err(network)?;
         channel
             .request_pty(
@@ -189,8 +200,18 @@ impl Task {
             .map_err(network)?;
         channel.request_shell(false).await.map_err(network)?;
         self.status.set(SessionState::Connected);
+        // Les tunnels vivent avec la session : leur abandon (Drop) les ferme.
+        let open_tunnels = tunnels::open(
+            handle,
+            &connection.local_forwards,
+            &self.tunnels,
+            &self.status,
+        )
+        .await;
 
         let end = self.relay(channel, input, responses).await;
+        drop(open_tunnels);
+        lock(&self.tunnels).clear();
         // Le serveur a pu fermer de lui-même : un échec de la déconnexion est sans conséquence.
         if let Err(error) = handle.disconnect(Disconnect::ByApplication, "", "fr").await {
             tracing::debug!(%error, "SSH disconnect after terminal session failed");

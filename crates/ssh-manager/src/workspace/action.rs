@@ -28,6 +28,8 @@ pub enum Action {
         plain: bool,
     },
     ImportBackup,
+    /// Crée des connexions à partir de `~/.ssh/config`.
+    ImportSshConfig,
     /// Ctrl+M : répartit les sessions en mosaïque, ou revient aux onglets.
     ToggleMosaic,
     PlaceInMosaic {
@@ -71,6 +73,8 @@ pub enum Action {
     },
     TrustHostKey {
         session: u64,
+        /// `hôte:port` du serveur dont la clé a changé (la cible ou le rebond).
+        host: String,
         fingerprint: String,
     },
 }

@@ -17,11 +17,13 @@ enum GlobalAction {
     Recordings,
     Settings,
     Mosaic,
+    ImportSshConfig,
 }
 
 impl GlobalAction {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::NewConnection,
+        Self::ImportSshConfig,
         Self::Mosaic,
         Self::Toolbox,
         Self::Recordings,
@@ -35,6 +37,7 @@ impl GlobalAction {
             Self::Recordings => "Historique des sessions",
             Self::Settings => "Réglages",
             Self::Mosaic => "Basculer en mosaïque",
+            Self::ImportSshConfig => "Importer ~/.ssh/config",
         }
     }
 
@@ -53,6 +56,7 @@ impl GlobalAction {
             Self::Recordings => Action::OpenRecordings,
             Self::Settings => Action::OpenSettings,
             Self::Mosaic => Action::ToggleMosaic,
+            Self::ImportSshConfig => Action::ImportSshConfig,
         }
     }
 }

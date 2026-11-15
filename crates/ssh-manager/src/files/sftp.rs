@@ -10,10 +10,10 @@ use tokio::io::AsyncWriteExt;
 use super::remote_path::format_permissions;
 use super::transfer::{self, CopyOutcome, TransferHooks};
 use super::{FsError, RemoteEntry};
-use crate::session::transport::{self, SharedStatus, SshHandle, network};
+use crate::session::transport::{self, Route, SharedStatus, SshLink, network};
 
 pub struct SftpBackend {
-    handle: SshHandle,
+    link: SshLink,
     sftp: SftpSession,
 }
 
@@ -24,11 +24,11 @@ fn failed(context: &str, error: impl std::fmt::Display) -> FsError {
 impl SftpBackend {
     pub async fn connect(
         connection: &Connection,
-        pinned: Option<String>,
+        route: &Route,
         status: &SharedStatus,
     ) -> Result<Self, FsError> {
-        let handle = transport::open(connection, pinned, status).await?;
-        let channel = handle.channel_open_session().await.map_err(network)?;
+        let link = transport::open(connection, route, status).await?;
+        let channel = link.handle.channel_open_session().await.map_err(network)?;
         channel
             .request_subsystem(true, "sftp")
             .await
@@ -36,7 +36,7 @@ impl SftpBackend {
         let sftp = SftpSession::new(channel.into_stream())
             .await
             .map_err(|error| failed("le serveur refuse le sous-système SFTP", error))?;
-        Ok(Self { handle, sftp })
+        Ok(Self { link, sftp })
     }
 
     /// Dossier d'accueil de l'utilisateur sur le serveur.
@@ -175,6 +175,7 @@ impl SftpBackend {
             tracing::warn!(%error, "SFTP session did not close cleanly");
         }
         if let Err(error) = self
+            .link
             .handle
             .disconnect(Disconnect::ByApplication, "", "fr")
             .await

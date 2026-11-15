@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::transfer::TransferHooks;
 use super::{Backend, FsError, RemoteEntry, remote_path, upload_plan};
-use crate::session::transport::{SessionState, SharedStatus, lock};
+use crate::session::transport::{LearnedHostKey, Route, SessionState, SharedStatus, lock};
 
 /// Avancement du transfert en cours.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +86,7 @@ impl FileBrowser {
         runtime: &Runtime,
         ctx: egui::Context,
         connection: Connection,
-        pinned_host_key: Option<String>,
+        route: Route,
     ) -> Self {
         let (commands, receiver) = unbounded_channel();
         let browser = Self {
@@ -100,7 +100,7 @@ impl FileBrowser {
             listing: browser.listing.clone(),
             cancel: browser.cancel.clone(),
         };
-        runtime.spawn(worker.run(connection, pinned_host_key, receiver));
+        runtime.spawn(worker.run(connection, route, receiver));
         browser
     }
 
@@ -108,8 +108,8 @@ impl FileBrowser {
         self.status.state()
     }
 
-    pub fn take_learned_host_key(&self) -> Option<String> {
-        self.status.take_learned_host_key()
+    pub fn take_learned_host_keys(&self) -> Vec<LearnedHostKey> {
+        self.status.take_learned_host_keys()
     }
 
     pub fn listing(&self) -> Listing {
@@ -168,12 +168,12 @@ impl Worker {
     async fn run(
         self,
         connection: Connection,
-        pinned: Option<String>,
+        route: Route,
         mut commands: UnboundedReceiver<Command>,
     ) {
         let target = connection.target();
         tracing::info!(%target, protocol = connection.kind.label(), "file session connecting");
-        let mut backend = match Backend::connect(&connection, pinned, &self.status).await {
+        let mut backend = match Backend::connect(&connection, &route, &self.status).await {
             Ok(backend) => backend,
             Err(error) => {
                 tracing::warn!(%target, %error, "file session failed");

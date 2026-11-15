@@ -20,7 +20,7 @@ pub use browser::FileBrowser;
 use ftp::FtpBackend;
 use sftp::SftpBackend;
 
-use crate::session::transport::{SessionError, SharedStatus};
+use crate::session::transport::{Route, SessionError, SharedStatus};
 
 /// Une entrée d'un dossier distant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +65,13 @@ enum Backend {
 impl Backend {
     async fn connect(
         connection: &Connection,
-        pinned: Option<String>,
+        route: &Route,
         status: &SharedStatus,
     ) -> Result<Self, FsError> {
         match connection.kind {
             ConnectionKind::Ftp => Ok(Self::Ftp(FtpBackend::connect(connection).await?)),
             ConnectionKind::Sftp | ConnectionKind::Ssh => Ok(Self::Sftp(
-                SftpBackend::connect(connection, pinned, status).await?,
+                SftpBackend::connect(connection, route, status).await?,
             )),
         }
     }

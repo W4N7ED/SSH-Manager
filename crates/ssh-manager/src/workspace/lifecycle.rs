@@ -2,26 +2,23 @@
 //! reconnexion dans le même onglet, fermeture, et clés d'hôte.
 
 use super::*;
+use crate::session::transport::{JumpHop, Route};
 use auto_reconnect::AutoReconnect;
 
 impl Workspace {
     /// Épingle dans le coffre les clés d'hôte découvertes à la première connexion.
     pub(super) fn pin_learned_host_keys(&mut self) {
-        let learned: Vec<(String, String)> = self
+        let learned: Vec<_> = self
             .sessions
             .iter()
-            .filter_map(|session| {
-                session
-                    .take_learned_host_key()
-                    .map(|key| (session.connection.host_key_id(), key))
-            })
+            .flat_map(OpenSession::take_learned_host_keys)
             .collect();
         if learned.is_empty() {
             return;
         }
-        for (host, fingerprint) in learned {
-            tracing::info!(%host, %fingerprint, "host key pinned on first use");
-            self.data.host_keys.insert(host, fingerprint);
+        for key in learned {
+            tracing::info!(host = %key.host, fingerprint = %key.fingerprint, "host key pinned on first use");
+            self.data.host_keys.insert(key.host, key.fingerprint);
         }
         self.persist();
     }
@@ -130,14 +127,32 @@ impl Workspace {
         self.data.host_keys.get(&connection.host_key_id()).cloned()
     }
 
+    /// Empreinte épinglée de la cible, et rebond enregistré éventuel. Un
+    /// rebond qui n'existe plus est ignoré (et signalé dans le journal).
+    pub(super) fn route_for(&self, connection: &Connection) -> Route {
+        let jump = connection.jump_connection_id.as_deref().and_then(|id| {
+            let found = self.data.library.find(id).filter(|jump| jump.id != connection.id);
+            if found.is_none() {
+                tracing::warn!(target = %connection.target(), jump = %id, "jump connection not found — connecting directly");
+            }
+            found.map(|jump| JumpHop {
+                pinned: self.pinned_host_key(jump),
+                connection: jump.clone(),
+            })
+        });
+        Route {
+            pinned: self.pinned_host_key(connection),
+            jump,
+        }
+    }
+
     pub(super) fn start_files(&self, connection: &Connection) -> SessionKind {
-        let pinned = self.pinned_host_key(connection);
         SessionKind::Files {
             browser: FileBrowser::start(
                 &self.runtime,
                 self.ctx.clone(),
                 connection.clone(),
-                pinned,
+                self.route_for(connection),
             ),
             view: BrowserView::default(),
         }
@@ -148,13 +163,12 @@ impl Workspace {
         connection: &Connection,
         buffers: TerminalBuffers,
     ) -> SessionKind {
-        let pinned = self.pinned_host_key(connection);
         let size = lock(&buffers.emulator).size();
         let ssh = SshSession::start(
             &self.runtime,
             self.ctx.clone(),
             connection.clone(),
-            pinned,
+            self.route_for(connection),
             buffers.clone(),
         );
         SessionKind::Terminal {
@@ -211,11 +225,11 @@ impl Workspace {
         }
     }
 
-    pub(super) fn trust_host_key(&mut self, id: u64, fingerprint: String) {
-        let Some(session) = self.sessions.iter().find(|session| session.id == id) else {
+    /// Remplace l'empreinte de `host` (la cible ou son rebond), puis relance.
+    pub(super) fn trust_host_key(&mut self, id: u64, host: String, fingerprint: String) {
+        if !self.sessions.iter().any(|session| session.id == id) {
             return;
-        };
-        let host = session.connection.host_key_id();
+        }
         tracing::warn!(%host, %fingerprint, "host key replaced at the user's request");
         self.data.host_keys.insert(host, fingerprint);
         self.persist();

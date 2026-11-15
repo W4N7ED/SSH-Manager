@@ -1,6 +1,6 @@
 //! Connexion SSH authentifiée, partagée par le terminal et le navigateur SFTP :
-//! vérification de la clé d'hôte, authentification, et état observable par
-//! l'interface.
+//! vérification de la clé d'hôte, authentification, rebond éventuel par un
+//! autre serveur, et état observable par l'interface.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,8 +17,13 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SessionError {
-    #[error("la clé d'hôte du serveur a changé")]
-    HostKeyChanged { known: String, received: String },
+    /// `host` (`hôte:port`) désigne le serveur concerné : la cible ou le rebond.
+    #[error("la clé d'hôte du serveur {host} a changé")]
+    HostKeyChanged {
+        host: String,
+        known: String,
+        received: String,
+    },
     #[error("authentification refusée par le serveur")]
     Authentication,
     #[error("clé privée illisible : {0}")]
@@ -58,13 +63,21 @@ pub fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// État d'une session tel que l'interface l'observe, et l'empreinte découverte
-/// à la première connexion. Partagé entre l'interface et la tâche réseau.
+/// Empreinte vue pour la première fois sur un serveur, à épingler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedHostKey {
+    /// `hôte:port`, comme la clé d'épinglage du coffre.
+    pub host: String,
+    pub fingerprint: String,
+}
+
+/// État d'une session tel que l'interface l'observe, et les empreintes
+/// découvertes. Partagé entre l'interface et la tâche réseau.
 #[derive(Clone)]
 pub struct SharedStatus {
     ctx: egui::Context,
     state: Arc<Mutex<SessionState>>,
-    learned_host_key: Arc<Mutex<Option<String>>>,
+    learned_host_keys: Arc<Mutex<Vec<LearnedHostKey>>>,
 }
 
 impl SharedStatus {
@@ -72,7 +85,7 @@ impl SharedStatus {
         Self {
             ctx,
             state: Arc::new(Mutex::new(SessionState::Connecting)),
-            learned_host_key: Arc::new(Mutex::new(None)),
+            learned_host_keys: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -89,13 +102,13 @@ impl SharedStatus {
         self.ctx.request_repaint();
     }
 
-    /// Empreinte découverte à la première connexion ; renvoyée une seule fois.
-    pub fn take_learned_host_key(&self) -> Option<String> {
-        lock(&self.learned_host_key).take()
+    /// Empreintes découvertes depuis le dernier appel ; chacune n'est livrée qu'une fois.
+    pub fn take_learned_host_keys(&self) -> Vec<LearnedHostKey> {
+        std::mem::take(&mut lock(&self.learned_host_keys))
     }
 
-    fn learn_host_key(&self, fingerprint: String) {
-        *lock(&self.learned_host_key) = Some(fingerprint);
+    fn learn_host_key(&self, host: String, fingerprint: String) {
+        lock(&self.learned_host_keys).push(LearnedHostKey { host, fingerprint });
     }
 }
 
@@ -132,51 +145,163 @@ impl client::Handler for HostKeyGuard {
 
 pub type SshHandle = Handle<HostKeyGuard>;
 
-/// Ouvre une connexion SSH authentifiée. Une empreinte vue pour la première
-/// fois est transmise à `status`, pour être épinglée dans le coffre.
-pub async fn open(
-    connection: &Connection,
-    pinned: Option<String>,
-    status: &SharedStatus,
-) -> Result<SshHandle, SessionError> {
-    let mut handle = connect(connection, pinned, status).await?;
-    authenticate(&mut handle, connection).await?;
-    Ok(handle)
+/// Serveur de rebond : la connexion enregistrée et son empreinte épinglée.
+#[derive(Debug, Clone)]
+pub struct JumpHop {
+    pub connection: Connection,
+    pub pinned: Option<String>,
 }
 
-async fn connect(
+/// Comment joindre la cible : son empreinte épinglée, et le rebond éventuel.
+#[derive(Debug, Clone, Default)]
+pub struct Route {
+    pub pinned: Option<String>,
+    pub jump: Option<JumpHop>,
+}
+
+impl Route {
+    /// Connexion directe, sans rebond (raccourci des tests).
+    #[cfg(test)]
+    pub fn direct(pinned: Option<String>) -> Self {
+        Self { pinned, jump: None }
+    }
+}
+
+/// Connexion établie. Le rebond, s'il y en a un, vit aussi longtemps qu'elle :
+/// le libérer couperait le tunnel qui la porte.
+pub struct SshLink {
+    pub handle: Arc<SshHandle>,
+    _jump: Option<SshHandle>,
+}
+
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        ..Default::default()
+    })
+}
+
+/// Ouvre une connexion SSH authentifiée, directement ou par le rebond de
+/// `route`. Une empreinte vue pour la première fois est transmise à
+/// `status`, pour être épinglée dans le coffre.
+pub async fn open(
+    connection: &Connection,
+    route: &Route,
+    status: &SharedStatus,
+) -> Result<SshLink, SessionError> {
+    let Some(jump) = &route.jump else {
+        let mut handle = connect_direct(connection, route.pinned.clone(), status).await?;
+        authenticate(&mut handle, connection).await?;
+        return Ok(SshLink {
+            handle: Arc::new(handle),
+            _jump: None,
+        });
+    };
+    let jump_name = jump.connection.name.clone();
+    let in_jump = |error: SessionError| match error {
+        // Le refus de clé d'hôte garde son serveur : l'utilisateur peut y faire confiance.
+        changed @ SessionError::HostKeyChanged { .. } => changed,
+        other => SessionError::Connect(format!("rebond « {jump_name} » : {other}")),
+    };
+    let mut jump_handle = connect_direct(&jump.connection, jump.pinned.clone(), status)
+        .await
+        .map_err(in_jump)?;
+    authenticate(&mut jump_handle, &jump.connection)
+        .await
+        .map_err(in_jump)?;
+    let channel = jump_handle
+        .channel_open_direct_tcpip(
+            connection.host.clone(),
+            u32::from(connection.port),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .map_err(|error| {
+            SessionError::Connect(format!(
+                "le rebond « {} » ne joint pas {} : {error}",
+                jump.connection.name,
+                connection.host_key_id()
+            ))
+        })?;
+    let observed = Arc::new(Mutex::new(None));
+    let guard = HostKeyGuard {
+        pinned: route.pinned.clone(),
+        observed: observed.clone(),
+    };
+    let attempt = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect_stream(client_config(), channel.into_stream(), guard),
+    )
+    .await;
+    let mut handle = settle(
+        connection,
+        route.pinned.clone(),
+        status,
+        &observed,
+        attempt.map_err(|_| ()),
+    )?;
+    authenticate(&mut handle, connection).await?;
+    tracing::info!(target = %connection.target(), jump = %jump.connection.target(), "ssh connection opened through a jump host");
+    Ok(SshLink {
+        handle: Arc::new(handle),
+        _jump: Some(jump_handle),
+    })
+}
+
+async fn connect_direct(
     connection: &Connection,
     pinned: Option<String>,
     status: &SharedStatus,
 ) -> Result<SshHandle, SessionError> {
-    let config = Arc::new(client::Config {
-        keepalive_interval: Some(KEEPALIVE_INTERVAL),
-        ..Default::default()
-    });
     let observed = Arc::new(Mutex::new(None));
     let guard = HostKeyGuard {
         pinned: pinned.clone(),
         observed: observed.clone(),
     };
     let address = (connection.host.clone(), connection.port);
+    let attempt = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect(client_config(), address, guard),
+    )
+    .await;
+    settle(
+        connection,
+        pinned,
+        status,
+        &observed,
+        attempt.map_err(|_| ()),
+    )
+}
 
-    let attempt =
-        tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, address, guard)).await;
-    let received = lock(&observed).clone();
+/// Interprète la fin de la négociation : délai dépassé, clé d'hôte changée,
+/// erreur réseau, ou succès (une première empreinte est alors apprise).
+fn settle(
+    connection: &Connection,
+    pinned: Option<String>,
+    status: &SharedStatus,
+    observed: &Mutex<Option<String>>,
+    attempt: Result<Result<SshHandle, russh::Error>, ()>,
+) -> Result<SshHandle, SessionError> {
+    let received = lock(observed).clone();
     match attempt {
-        Err(_) => Err(SessionError::Connect(format!(
+        Err(()) => Err(SessionError::Connect(format!(
             "aucune réponse après {} s",
             CONNECT_TIMEOUT.as_secs()
         ))),
         Ok(Err(error)) => match (pinned, received) {
             (Some(known), Some(received)) if known != received => {
-                Err(SessionError::HostKeyChanged { known, received })
+                Err(SessionError::HostKeyChanged {
+                    host: connection.host_key_id(),
+                    known,
+                    received,
+                })
             }
             _ => Err(network(error)),
         },
         Ok(Ok(handle)) => {
             if let (None, Some(fingerprint)) = (pinned, received) {
-                status.learn_host_key(fingerprint);
+                status.learn_host_key(connection.host_key_id(), fingerprint);
             }
             Ok(handle)
         }

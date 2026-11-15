@@ -13,6 +13,8 @@ use crate::files::FileBrowser;
 use crate::files::view::{self as files_view, BrowserView};
 use crate::session::emulator::GridSize;
 use crate::session::ssh::{SessionError, SessionState, SshSession, TerminalBuffers};
+use crate::session::transport::LearnedHostKey;
+use crate::session::tunnels::{TunnelState, TunnelStatus};
 use crate::session::view::{self, TerminalOptions};
 use crate::theme::{self, color, radius};
 use crate::widgets;
@@ -59,10 +61,10 @@ impl OpenSession {
         }
     }
 
-    pub fn take_learned_host_key(&self) -> Option<String> {
+    pub fn take_learned_host_keys(&self) -> Vec<LearnedHostKey> {
         match &self.kind {
-            SessionKind::Terminal { ssh, .. } => ssh.take_learned_host_key(),
-            SessionKind::Files { browser, .. } => browser.take_learned_host_key(),
+            SessionKind::Terminal { ssh, .. } => ssh.take_learned_host_keys(),
+            SessionKind::Files { browser, .. } => browser.take_learned_host_keys(),
         }
     }
 
@@ -626,6 +628,39 @@ fn auto_reconnect_text(auto: Option<AutoReconnectStatus>) -> String {
     }
 }
 
+/// « ⇄ 2 tunnels », en orange si l'un n'a pas pu s'ouvrir ; le détail au survol.
+fn tunnels_label(ui: &mut Ui, tunnels: &[TunnelStatus]) {
+    if tunnels.is_empty() {
+        return;
+    }
+    let failed = tunnels
+        .iter()
+        .any(|tunnel| matches!(tunnel.state, TunnelState::Failed(_)));
+    let plural = if tunnels.len() > 1 { "s" } else { "" };
+    let tint = if failed {
+        color::WARNING
+    } else {
+        color::SUCCESS
+    };
+    let details: Vec<String> = tunnels
+        .iter()
+        .map(|tunnel| match &tunnel.state {
+            TunnelState::Listening => format!(
+                "✓ 127.0.0.1:{} — {} connexion(s)",
+                tunnel.forward.describe(),
+                tunnel.connections
+            ),
+            TunnelState::Failed(reason) => format!("✗ {} — {reason}", tunnel.forward.describe()),
+        })
+        .collect();
+    ui.label(
+        RichText::new(format!("⇄ {} tunnel{plural}", tunnels.len()))
+            .font(theme::mono(11.0))
+            .color(tint),
+    )
+    .on_hover_text(details.join("\n"));
+}
+
 /// Bandeau d'une session terminée : la raison et le moyen de reprendre.
 fn disconnected_banner(
     id: u64,
@@ -695,6 +730,9 @@ fn toolbar(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &m
                         .font(theme::mono(11.0))
                         .color(color::TEXT_DIM),
                 );
+                if let SessionKind::Terminal { ssh, .. } = &session.kind {
+                    tunnels_label(ui, &ssh.tunnels());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close =
                         egui::Button::new(RichText::new("✕").size(11.0).color(color::TEXT_MUTED))
@@ -739,7 +777,7 @@ fn failure(session: &OpenSession, error: &SessionError, ui: &mut Ui, actions: &m
                 ui.label(RichText::new("Connexion échouée").font(theme::sans_bold(18.0)).color(color::DANGER));
                 ui.add_space(8.0);
                 match error {
-                    SessionError::HostKeyChanged { known, received } => {
+                    SessionError::HostKeyChanged { host, known, received } => {
                         ui.label(RichText::new(
                             "⚠ La clé d'hôte du serveur a changé. Cela peut indiquer une usurpation de serveur (« man-in-the-middle »), ou une réinstallation légitime. La connexion a été refusée.",
                         ));
@@ -747,7 +785,7 @@ fn failure(session: &OpenSession, error: &SessionError, ui: &mut Ui, actions: &m
                         ui.label(RichText::new(format!("Empreinte connue : {known}\nEmpreinte reçue : {received}")).font(theme::mono(11.0)).color(color::TEXT_MUTED));
                         ui.add_space(12.0);
                         if widgets::secondary_button(ui, "Je sais que le changement est légitime — faire confiance à la nouvelle clé").clicked() {
-                            actions.push(Action::TrustHostKey { session: session.id, fingerprint: received.clone() });
+                            actions.push(Action::TrustHostKey { session: session.id, host: host.clone(), fingerprint: received.clone() });
                         }
                     }
                     SessionError::Authentication if session.connection.private_key_path.is_none() => {

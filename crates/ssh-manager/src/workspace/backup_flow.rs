@@ -4,6 +4,45 @@
 use super::*;
 
 impl Workspace {
+    /// Importe les serveurs de `~/.ssh/config` dans le groupe « ssh config ».
+    /// Un serveur déjà enregistré (même user@hôte:port) n'est pas dupliqué.
+    pub(super) fn import_ssh_config(&mut self) {
+        let home = dirs::home_dir().unwrap_or_default();
+        let path = home.join(".ssh").join("config");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.notify(format!("Aucun fichier {}", path.display()), false);
+                return;
+            }
+            Err(error) => {
+                tracing::error!(path = %path.display(), %error, "ssh config could not be read");
+                self.notify(format!("Lecture impossible : {error}"), false);
+                return;
+            }
+        };
+        let home_text = home.display().to_string();
+        let default_user = std::env::var("USERNAME").unwrap_or_default();
+        let context = ssh_manager_core::ssh_config::ImportContext {
+            home: &home_text,
+            default_user: &default_user,
+            group: "ssh config",
+            now: now_millis(),
+        };
+        let entries = ssh_manager_core::ssh_config::parse(&text);
+        let connections = ssh_manager_core::ssh_config::to_connections(&entries, &context);
+        let added = self.data.library.import(connections);
+        tracing::info!(path = %path.display(), hosts = entries.len(), added, "ssh config imported");
+        self.persist();
+        self.notify(
+            format!(
+                "{added} connexion(s) importée(s) depuis ~/.ssh/config ({} serveur(s) lu(s))",
+                entries.len()
+            ),
+            true,
+        );
+    }
+
     pub(super) fn backup_modals(&mut self, ctx: &egui::Context) {
         if self.confirm_plain_export
             && let Some(confirmed) = backup_dialogs::confirm_plain_export(ctx)

@@ -71,12 +71,51 @@ impl ConnectionLibrary {
     }
 
     /// Supprime une connexion. Renvoie la connexion retirée, s'il y en avait une.
+    /// Retire une connexion ; celles qui passaient par elle (rebond) se
+    /// connectent désormais directement.
     pub fn remove(&mut self, id: &str) -> Option<Connection> {
         let index = self
             .connections
             .iter()
             .position(|connection| connection.id == id)?;
+        for other in &mut self.connections {
+            if other.jump_connection_id.as_deref() == Some(id) {
+                other.jump_connection_id = None;
+            }
+        }
         Some(self.connections.remove(index))
+    }
+
+    /// Ajoute des connexions importées (`~/.ssh/config`…). Une connexion déjà
+    /// présente vers la même cible (`user@hôte:port`) n'est pas dupliquée ;
+    /// les rebonds qui la désignaient pointent vers l'existante.
+    /// Renvoie le nombre de connexions ajoutées.
+    pub fn import(&mut self, imported: Vec<Connection>) -> usize {
+        let mut replaced: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut added = Vec::new();
+        for connection in imported {
+            match self
+                .connections
+                .iter()
+                .find(|existing| existing.target() == connection.target())
+            {
+                Some(existing) => {
+                    replaced.insert(connection.id, existing.id.clone());
+                }
+                None => added.push(connection),
+            }
+        }
+        let count = added.len();
+        for mut connection in added {
+            if let Some(jump) = &connection.jump_connection_id
+                && let Some(existing) = replaced.get(jump)
+            {
+                connection.jump_connection_id = Some(existing.clone());
+            }
+            self.upsert(connection);
+        }
+        count
     }
 
     pub fn toggle_favorite(&mut self, id: &str) {
@@ -235,6 +274,41 @@ mod tests {
         library.upsert(connection("db", Some("Production")));
         library.upsert(connection("lab", None));
         library
+    }
+
+    #[test]
+    fn should_connect_directly_once_the_jump_connection_is_removed() {
+        let mut library = library();
+        let mut db = library.find("db").unwrap().clone();
+        db.jump_connection_id = Some("web".into());
+        library.upsert(db);
+        library.remove("web");
+        assert_eq!(library.find("db").unwrap().jump_connection_id, None);
+    }
+
+    #[test]
+    fn should_import_without_duplicating_and_relink_jumps_to_existing_connections() {
+        let mut library = library();
+        let duplicate_of_web = Connection {
+            id: "imported-web".into(),
+            ..connection("web", None)
+        };
+        let new_host = Connection {
+            id: "imported-api".into(),
+            jump_connection_id: Some("imported-web".into()),
+            ..connection("api", None)
+        };
+        let added = library.import(vec![duplicate_of_web, new_host]);
+        assert_eq!(added, 1);
+        assert!(library.find("imported-web").is_none());
+        assert_eq!(
+            library
+                .find("imported-api")
+                .unwrap()
+                .jump_connection_id
+                .as_deref(),
+            Some("web")
+        );
     }
 
     #[test]

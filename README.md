@@ -15,8 +15,13 @@ automatiquement le coffre et les sauvegardes.
 - **Navigateur de fichiers** SFTP et FTP/FTPS : envoi (y compris dossiers entiers et
   glisser-déposer depuis l'Explorateur), téléchargement avec progression et annulation,
   renommage (F2), droits, suppression récursive.
-- **Reconnexion** dans le même onglet (Entrée, bouton ou clic droit), écran conservé.
-- **Enregistrement des sessions** (chiffré) et export en `.txt`, fenêtre « Historique ».
+- **Reconnexion** dans le même onglet (Entrée, bouton ou clic droit), écran conservé ;
+  reconnexion automatique après une coupure (réseau, délai, veille), jamais après « exit ».
+- **Rebond** (ProxyJump) par une autre connexion enregistrée, dont les identifiants
+  doivent être mémorisés ; **tunnels locaux** (`ssh -L`) sur 127.0.0.1, ouverts avec le terminal.
+- **Import de `~/.ssh/config`** : HostName, User, Port, IdentityFile, ProxyJump, LocalForward.
+- **Enregistrement des sessions** (chiffré) et export en `.txt`, fenêtre « Historique »,
+  durée de conservation réglable.
 - **Connexion rapide** `user@hôte:port` dans la recherche, **palette Ctrl+K**.
 - **Boîte à outils** : générateur de mots de passe ; copies tenues hors de
   l'historique Windows (Win+V) et effacées après un délai.

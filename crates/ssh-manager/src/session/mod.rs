@@ -11,6 +11,7 @@ pub mod ssh;
 pub mod terminal_theme;
 pub mod transcript;
 pub mod transport;
+pub mod tunnels;
 pub mod utf8_boundary;
 pub mod view;
 
