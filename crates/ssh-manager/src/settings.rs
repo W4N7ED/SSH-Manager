@@ -26,10 +26,21 @@ impl PasteMode {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub paste_mode: PasteMode,
+    /// Enregistre le texte de chaque session terminal (chiffré).
+    pub record_sessions: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            paste_mode: PasteMode::default(),
+            record_sessions: true,
+        }
+    }
 }
 
 fn file() -> PathBuf {
@@ -76,9 +87,20 @@ mod tests {
     }
 
     #[test]
+    fn should_record_sessions_by_default_even_for_older_settings_files() {
+        assert!(Settings::default().record_sessions);
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"pasteMode":"ctrlV"}"#)
+                .unwrap()
+                .record_sessions
+        );
+    }
+
+    #[test]
     fn should_round_trip_through_json() {
         let settings = Settings {
             paste_mode: PasteMode::CtrlV,
+            record_sessions: false,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);

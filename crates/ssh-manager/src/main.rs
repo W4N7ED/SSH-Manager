@@ -7,6 +7,7 @@ mod app;
 mod background;
 mod clipboard;
 mod files;
+mod recordings;
 mod screens;
 mod session;
 mod settings;

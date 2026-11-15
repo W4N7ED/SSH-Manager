@@ -43,6 +43,19 @@ pub fn show(ctx: &egui::Context, settings: &mut Settings) -> bool {
                     .color(color::TEXT_DIM),
             );
 
+            ui.add_space(18.0);
+            widgets::micro_label(ui, "Terminal — enregistrement");
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut settings.record_sessions,
+                RichText::new("Enregistrer le texte de chaque session").font(theme::sans(13.0)),
+            );
+            ui.label(
+                RichText::new("Le texte est chiffré avec la clé du coffre. Retrouvez les sessions dans « Historique » pour les exporter en .txt. Les saisies non affichées (mots de passe) ne sont jamais enregistrées.")
+                    .font(theme::sans(12.0))
+                    .color(color::TEXT_DIM),
+            );
+
             ui.add_space(20.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::primary_button(ui, "Fermer").clicked() {

@@ -57,6 +57,21 @@ pub fn show(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>) {
                     if ui.add(settings).on_hover_text("Réglages").clicked() {
                         actions.push(Action::OpenSettings);
                     }
+                    let history = egui::Button::new(
+                        RichText::new("Historique")
+                            .size(13.0)
+                            .color(color::TEXT_MUTED),
+                    )
+                    .fill(color::SURFACE)
+                    .corner_radius(CornerRadius::same(radius::PILL))
+                    .min_size(egui::vec2(0.0, 34.0));
+                    if ui
+                        .add(history)
+                        .on_hover_text("Sessions enregistrées, à exporter en .txt")
+                        .clicked()
+                    {
+                        actions.push(Action::OpenRecordings);
+                    }
                 });
             });
         });

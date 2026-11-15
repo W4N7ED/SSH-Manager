@@ -2,10 +2,19 @@
 //! cellules. Aucune dépendance au réseau ni à l'interface.
 
 use alacritty_terminal::event::{Event, EventListener};
+use std::sync::{Arc, Mutex};
+
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use tokio::sync::mpsc::UnboundedSender;
+
+use super::transport::lock;
+use super::utf8_boundary::Utf8Boundary;
+
+type ResponseTarget = Arc<Mutex<Option<UnboundedSender<Vec<u8>>>>>;
 
 /// Historique conservé au-dessus de l'écran, en lignes.
 const SCROLLBACK_LINES: usize = 10_000;
@@ -33,13 +42,14 @@ impl Dimensions for GridSize {
 
 /// Reçoit les évènements du terminal. Seules les réponses que l'émulateur doit
 /// renvoyer au serveur (identification, position du curseur…) nous intéressent.
+/// La destination change à chaque reconnexion, d'où le partage.
 pub struct ResponseSink {
-    responses: Option<UnboundedSender<Vec<u8>>>,
+    responses: ResponseTarget,
 }
 
 impl EventListener for ResponseSink {
     fn send_event(&self, event: Event) {
-        if let (Event::PtyWrite(text), Some(responses)) = (event, &self.responses) {
+        if let (Event::PtyWrite(text), Some(responses)) = (event, lock(&self.responses).as_ref()) {
             // Fermé seulement si la session s'est déjà arrêtée : rien à renvoyer alors.
             let _ = responses.send(text.into_bytes());
         }
@@ -49,7 +59,9 @@ impl EventListener for ResponseSink {
 pub struct Emulator {
     term: Term<ResponseSink>,
     parser: Processor,
+    boundary: Utf8Boundary,
     size: GridSize,
+    responses: ResponseTarget,
 }
 
 impl Emulator {
@@ -59,16 +71,53 @@ impl Emulator {
             scrolling_history: SCROLLBACK_LINES,
             ..Config::default()
         };
+        let responses = Arc::new(Mutex::new(responses));
         Self {
-            term: Term::new(config, &size, ResponseSink { responses }),
+            term: Term::new(
+                config,
+                &size,
+                ResponseSink {
+                    responses: responses.clone(),
+                },
+            ),
             parser: Processor::new(),
+            boundary: Utf8Boundary::default(),
             size,
+            responses,
         }
+    }
+
+    /// Redirige les réponses du terminal vers une nouvelle connexion : l'écran
+    /// et l'historique sont conservés d'une reconnexion à l'autre.
+    pub fn connect_responses(&self, responses: UnboundedSender<Vec<u8>>) {
+        *lock(&self.responses) = Some(responses);
+    }
+
+    /// Tout le texte conservé, historique compris, sans les lignes vides de fin.
+    pub fn history_text(&self) -> String {
+        let grid = self.term.grid();
+        let mut lines: Vec<String> = (grid.topmost_line().0..=grid.bottommost_line().0)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                (0..grid.columns())
+                    .map(|column| &row[Column(column)])
+                    .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+                    .map(|cell| cell.c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines.join("\n")
     }
 
     /// Interprète des octets reçus du serveur.
     pub fn advance(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        let complete = self.boundary.complete(bytes);
+        self.parser.advance(&mut self.term, &complete);
     }
 
     pub fn size(&self) -> GridSize {
@@ -166,6 +215,15 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_the_letter_that_follows_a_split_character() {
+        let mut emulator = emulator();
+        let bytes = "été".as_bytes();
+        emulator.advance(&bytes[..1]);
+        emulator.advance(&bytes[1..]);
+        assert_eq!(emulator.screen_text()[0], "été");
+    }
+
+    #[test]
     fn should_reply_to_a_device_attributes_query() {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut emulator = Emulator::new(
@@ -187,6 +245,22 @@ mod tests {
         let mut emulator = emulator();
         emulator.advance(b"\x1b[?1h");
         assert!(emulator.mode().contains(TermMode::APP_CURSOR));
+    }
+
+    #[test]
+    fn should_export_history_that_scrolled_off_the_screen() {
+        let mut emulator = emulator();
+        emulator.advance(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        assert_eq!(emulator.history_text(), "one\ntwo\nthree\nfour\nfive\nsix");
+    }
+
+    #[test]
+    fn should_send_responses_to_the_latest_connection() {
+        let mut emulator = emulator();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        emulator.connect_responses(sender);
+        emulator.advance(b"\x1b[c");
+        assert!(receiver.try_recv().is_ok());
     }
 
     #[test]

@@ -5,7 +5,9 @@ pub mod emulator;
 pub mod keys;
 pub mod palette;
 pub mod ssh;
+pub mod transcript;
 pub mod transport;
+pub mod utf8_boundary;
 pub mod view;
 
 #[cfg(test)]

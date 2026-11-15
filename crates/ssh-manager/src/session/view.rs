@@ -46,8 +46,22 @@ fn measure(ui: &Ui) -> CellMetrics {
     })
 }
 
-/// Affiche la session ; renvoie la taille de grille en cours.
-pub fn show(ui: &mut Ui, session: &SshSession, paste_mode: PasteMode) -> GridSize {
+/// Ce que l'affichage du terminal renvoie à l'onglet.
+pub struct TerminalResponse {
+    /// Taille de grille en cours.
+    pub size: GridSize,
+    /// Entrée pressée dans un terminal déconnecté : l'utilisateur veut se reconnecter.
+    pub reconnect_requested: bool,
+}
+
+/// Affiche la session. Hors connexion (`live` faux), l'écran reste lisible et
+/// sélectionnable, mais la saisie ne part plus : seule Entrée a un effet.
+pub fn show(
+    ui: &mut Ui,
+    session: &SshSession,
+    paste_mode: PasteMode,
+    live: bool,
+) -> TerminalResponse {
     let metrics = measure(ui);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let grid_rect = rect.shrink2(PADDING);
@@ -80,14 +94,34 @@ pub fn show(ui: &mut Ui, session: &SshSession, paste_mode: PasteMode) -> GridSiz
         session.resize(size);
     }
     handle_mouse(ui, &response, &mut emulator, grid_rect, metrics);
-    if paste_mode == PasteMode::RightClick
+    let mut reconnect_requested = false;
+    if !live {
+        reconnect_requested =
+            response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        // La sélection reste copiable : utile pour récupérer une sortie avant de reconnecter.
+        let copy_requested = ui.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Copy))
+        });
+        if response.has_focus()
+            && copy_requested
+            && let Some(text) = emulator
+                .term()
+                .selection_to_string()
+                .filter(|text| !text.is_empty())
+        {
+            ui.ctx().copy_text(text);
+        }
+    } else if paste_mode == PasteMode::RightClick
         && response.secondary_clicked()
         && let Some(text) = clipboard::read_text()
     {
         response.request_focus();
         paste(&mut emulator, session, &text);
     }
-    if response.has_focus() {
+    if live && response.has_focus() {
         handle_keyboard(ui, &mut emulator, session, paste_mode);
     }
     paint(
@@ -96,9 +130,12 @@ pub fn show(ui: &mut Ui, session: &SshSession, paste_mode: PasteMode) -> GridSiz
         grid_rect,
         metrics,
         &emulator,
-        response.has_focus(),
+        response.has_focus() && live,
     );
-    size
+    TerminalResponse {
+        size,
+        reconnect_requested,
+    }
 }
 
 fn paste(emulator: &mut Emulator, session: &SshSession, text: &str) {

@@ -5,10 +5,12 @@ mod inspector;
 mod list;
 mod password_prompt;
 mod rail;
+mod recordings_dialog;
 mod sessions;
 mod settings_dialog;
 mod top_bar;
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{CornerRadius, Frame, Margin, RichText, Ui};
@@ -18,16 +20,20 @@ use tokio::runtime::Runtime;
 
 use crate::files::FileBrowser;
 use crate::files::view::BrowserView;
-use crate::session::ssh::SshSession;
+use crate::recordings::{self, Recorder, RecordingError};
+use crate::session::ssh::{SshSession, TerminalBuffers, lock};
 use crate::settings::Settings;
 use crate::theme::{self, color, radius};
 
 pub use form::ConnectionForm;
 pub use list::SortState;
 use password_prompt::{PasswordPrompt, PromptResult};
+use recordings_dialog::{RecordingsChoice, RecordingsDialog};
 use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind};
 
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
+/// Ligne grisée insérée dans le terminal à chaque reconnexion.
+const RECONNECTION_MARKER: &str = "\r\n\x1b[2m── reconnexion ──\x1b[0m\r\n";
 
 /// Message éphémère en bas de l'écran.
 pub struct Notice {
@@ -44,6 +50,7 @@ pub enum Action {
     /// Ouvre une connexion SSH en navigateur de fichiers (SFTP).
     OpenFiles(String),
     OpenSettings,
+    OpenRecordings,
     NewConnection {
         group: Option<String>,
     },
@@ -63,6 +70,8 @@ pub enum Action {
     },
     CloseSession(u64),
     Reconnect(u64),
+    DuplicateSession(u64),
+    ExportSession(u64),
     RetryWithPassword(u64),
     TrustHostKey {
         session: u64,
@@ -93,6 +102,9 @@ pub struct Workspace {
     pub active: ActiveTab,
     pub settings: Settings,
     settings_open: bool,
+    recordings_dialog: Option<RecordingsDialog>,
+    /// Onglet à relancer en place une fois le mot de passe saisi.
+    reconnect_after_prompt: Option<u64>,
 }
 
 impl Workspace {
@@ -124,6 +136,8 @@ impl Workspace {
             active: ActiveTab::Home,
             settings: Settings::load(),
             settings_open: false,
+            recordings_dialog: None,
+            reconnect_after_prompt: None,
         };
         if let Some(text) = notice {
             workspace.notify(text, true);
@@ -237,9 +251,15 @@ impl Workspace {
                         .set_password(&connection.id, connection.password.clone());
                     self.persist();
                 }
-                self.start_session(connection);
+                match self.reconnect_after_prompt.take() {
+                    Some(id) => self.restart_in_place(id, Some(connection)),
+                    None => self.start_session(connection),
+                }
+            } else {
+                self.reconnect_after_prompt = None;
             }
         }
+        self.recordings_modal(ui.ctx());
         if self.settings_open && settings_dialog::show(ui.ctx(), &mut self.settings) {
             self.settings_open = false;
             if let Err(error) = self.settings.save() {
@@ -275,8 +295,11 @@ impl Workspace {
             Action::Open(id) => self.open(&id),
             Action::OpenFiles(id) => self.open_files(&id),
             Action::OpenSettings => self.settings_open = true,
+            Action::OpenRecordings => self.open_recordings(),
             Action::CloseSession(id) => self.close_session(id),
             Action::Reconnect(id) => self.reconnect(id, false),
+            Action::DuplicateSession(id) => self.duplicate_session(id),
+            Action::ExportSession(id) => self.export_session(id),
             Action::RetryWithPassword(id) => self.reconnect(id, true),
             Action::TrustHostKey {
                 session,
@@ -367,26 +390,19 @@ impl Workspace {
     fn start_session(&mut self, connection: Connection) {
         self.data.library.mark_used(&connection.id, now_millis());
         self.persist();
-        let pinned = self.data.host_keys.get(&connection.host_key_id()).cloned();
         let kind = if connection.kind.is_file_transfer() {
-            let browser =
-                FileBrowser::start(&self.runtime, self.ctx.clone(), connection.clone(), pinned);
-            SessionKind::Files {
-                browser,
-                view: BrowserView::default(),
-            }
+            self.start_files(&connection)
         } else {
-            let ssh = SshSession::start(
-                &self.runtime,
-                self.ctx.clone(),
-                connection.clone(),
-                pinned,
-                INITIAL_SIZE,
-            );
-            SessionKind::Terminal {
-                ssh,
-                size: INITIAL_SIZE,
-            }
+            let recorder = if self.settings.record_sessions {
+                Recorder::start(
+                    &ssh_manager_vault::paths::recordings_dir(),
+                    self.vault.recording_key(),
+                    &connection,
+                )
+            } else {
+                Recorder::disabled()
+            };
+            self.start_terminal(&connection, TerminalBuffers::new(INITIAL_SIZE, recorder))
         };
         let id = self.next_session_id;
         self.next_session_id += 1;
@@ -409,21 +425,183 @@ impl Workspace {
         }
     }
 
+    fn pinned_host_key(&self, connection: &Connection) -> Option<String> {
+        self.data.host_keys.get(&connection.host_key_id()).cloned()
+    }
+
+    fn start_files(&self, connection: &Connection) -> SessionKind {
+        let pinned = self.pinned_host_key(connection);
+        SessionKind::Files {
+            browser: FileBrowser::start(
+                &self.runtime,
+                self.ctx.clone(),
+                connection.clone(),
+                pinned,
+            ),
+            view: BrowserView::default(),
+        }
+    }
+
+    fn start_terminal(&self, connection: &Connection, buffers: TerminalBuffers) -> SessionKind {
+        let pinned = self.pinned_host_key(connection);
+        let size = lock(&buffers.emulator).size();
+        let ssh = SshSession::start(
+            &self.runtime,
+            self.ctx.clone(),
+            connection.clone(),
+            pinned,
+            buffers.clone(),
+        );
+        SessionKind::Terminal { ssh, size, buffers }
+    }
+
     /// Relance une session dans le même onglet, avec un nouveau mot de passe si demandé.
     fn reconnect(&mut self, id: u64, ask_password: bool) {
+        let Some(session) = self.sessions.iter().find(|session| session.id == id) else {
+            return;
+        };
+        if ask_password {
+            let mut connection = session.connection.clone();
+            connection.password = None;
+            self.reconnect_after_prompt = Some(id);
+            self.password_prompt = Some(PasswordPrompt::new(connection));
+        } else {
+            self.restart_in_place(id, None);
+        }
+    }
+
+    /// Reconnecte l'onglet sans le déplacer. Un terminal garde son écran, son
+    /// historique et son enregistrement : la reprise y est simplement signalée.
+    fn restart_in_place(&mut self, id: u64, connection: Option<Connection>) {
         let Some(index) = self.sessions.iter().position(|session| session.id == id) else {
             return;
         };
-        let session = self.sessions.remove(index);
-        if self.active == ActiveTab::Session(id) {
-            self.active = ActiveTab::Home;
+        if let Some(connection) = connection {
+            self.sessions[index].connection = connection;
         }
-        let mut connection = session.connection;
-        if ask_password {
-            connection.password = None;
-            self.password_prompt = Some(PasswordPrompt::new(connection));
-        } else {
-            self.start_session(connection);
+        let connection = self.sessions[index].connection.clone();
+        tracing::info!(target = %connection.target(), "reconnecting session in place");
+        let kind = match &self.sessions[index].kind {
+            SessionKind::Terminal { buffers, .. } => {
+                lock(&buffers.recorder).note("reconnexion");
+                lock(&buffers.emulator).advance(RECONNECTION_MARKER.as_bytes());
+                self.start_terminal(&connection, buffers.clone())
+            }
+            SessionKind::Files { .. } => self.start_files(&connection),
+        };
+        // L'ancienne session, déjà terminée, est libérée ici.
+        self.sessions[index].kind = kind;
+        self.active = ActiveTab::Session(id);
+    }
+
+    /// Ouvre un nouvel onglet sur la même connexion, sous le même protocole.
+    fn duplicate_session(&mut self, id: u64) {
+        if let Some(session) = self.sessions.iter().find(|session| session.id == id) {
+            let connection = session.connection.clone();
+            self.open_connection(connection);
+        }
+    }
+
+    fn export_session(&mut self, id: u64) {
+        let Some(session) = self.sessions.iter().find(|session| session.id == id) else {
+            return;
+        };
+        let SessionKind::Terminal { buffers, .. } = &session.kind else {
+            return;
+        };
+        let suggested = recordings::export_file_name(
+            &session.connection.name,
+            chrono::Local::now().timestamp(),
+        );
+        let text = {
+            let recorder = lock(&buffers.recorder);
+            match recorder.path() {
+                Some(path) => recordings::read_text(
+                    path,
+                    &self.vault.recording_key(),
+                    &recorder.pending_line(),
+                ),
+                None => Ok(recordings::screen_document(
+                    &session.connection,
+                    &lock(&buffers.emulator).history_text(),
+                )),
+            }
+        };
+        self.save_export(&suggested, text);
+    }
+
+    /// Demande où enregistrer, puis écrit le texte exporté.
+    fn save_export(&mut self, suggested: &str, text: Result<String, RecordingError>) {
+        let Some(target) = rfd::FileDialog::new()
+            .set_title("Exporter la session")
+            .set_file_name(suggested)
+            .add_filter("Texte", &["txt"])
+            .save_file()
+        else {
+            return;
+        };
+        match text.and_then(|text| recordings::write_export(&target, &text)) {
+            Ok(()) => {
+                tracing::info!(path = %target.display(), "session exported");
+                let name = target
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.notify(format!("Session exportée : {name}"), true);
+            }
+            Err(error) => {
+                tracing::error!(path = %target.display(), %error, "failed to export the session");
+                self.notify(format!("Export impossible : {error}"), false);
+            }
+        }
+    }
+
+    fn open_recordings(&mut self) {
+        let key = self.vault.recording_key();
+        let list = recordings::list(&ssh_manager_vault::paths::recordings_dir(), &key);
+        self.recordings_dialog = Some(RecordingsDialog::new(list));
+    }
+
+    /// Enregistrements des sessions encore ouvertes.
+    fn live_recordings(&self) -> Vec<PathBuf> {
+        self.sessions
+            .iter()
+            .filter_map(|session| match &session.kind {
+                SessionKind::Terminal { buffers, .. } => {
+                    lock(&buffers.recorder).path().map(Path::to_path_buf)
+                }
+                SessionKind::Files { .. } => None,
+            })
+            .collect()
+    }
+
+    fn recordings_modal(&mut self, ctx: &egui::Context) {
+        let live = self.live_recordings();
+        let enabled = self.settings.record_sessions;
+        let Some(dialog) = &mut self.recordings_dialog else {
+            return;
+        };
+        match dialog.show(ctx, &live, enabled) {
+            None => {}
+            Some(RecordingsChoice::Close) => self.recordings_dialog = None,
+            Some(RecordingsChoice::Export(recording)) => {
+                let suggested = recordings::export_file_name(
+                    &recording.header.connection_name,
+                    recording.header.started_at,
+                );
+                let text = recordings::read_text(&recording.path, &self.vault.recording_key(), "");
+                self.save_export(&suggested, text);
+            }
+            Some(RecordingsChoice::Delete(path)) => match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "session recording deleted");
+                    dialog.forget(&path);
+                }
+                Err(error) => {
+                    tracing::error!(path = %path.display(), %error, "failed to delete a session recording");
+                    self.notify(format!("Suppression impossible : {error}"), false);
+                }
+            },
         }
     }
 

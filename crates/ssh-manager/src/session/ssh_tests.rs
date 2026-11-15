@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
 
 use super::emulator::GridSize;
-use super::ssh::{SessionError, SessionState, SshSession, lock};
+use super::ssh::{SessionError, SessionState, SshSession, TerminalBuffers, lock};
+use crate::recordings::Recorder;
 
 const USER: &str = "tester";
 const PASSWORD: &str = "correct-horse";
@@ -80,6 +81,11 @@ impl server::Handler for EchoShell {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // « exit » : le shell se termine, comme après un délai d'inactivité côté serveur.
+        if data == b"exit\r" {
+            session.exit_status_request(channel, 0)?;
+            return session.close(channel);
+        }
         session.data(channel, data.to_vec())
     }
 
@@ -173,7 +179,7 @@ fn should_connect_pin_the_host_key_and_relay_bytes() {
         egui::Context::default(),
         connection(server.port, PASSWORD),
         None,
-        SIZE,
+        TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
 
     wait_until("connexion établie", || {
@@ -209,6 +215,87 @@ fn should_connect_pin_the_host_key_and_relay_bytes() {
 }
 
 #[test]
+fn should_keep_the_screen_after_the_shell_ends_and_reconnect_into_it() {
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    let buffers = TerminalBuffers::new(SIZE, Recorder::disabled());
+    let first = SshSession::start(
+        &runtime,
+        egui::Context::default(),
+        connection(server.port, PASSWORD),
+        Some(server.fingerprint.clone()),
+        buffers.clone(),
+    );
+    wait_until("message d'accueil", || screen_contains(&first, "welcome"));
+    first.send(b"avant-coupure".to_vec());
+    wait_until("écho", || screen_contains(&first, "avant-coupure"));
+    first.send(b"exit\r".to_vec());
+
+    wait_until("session terminée", || {
+        matches!(first.state(), SessionState::Closed { .. })
+    });
+    match first.state() {
+        SessionState::Closed { reason } => {
+            assert!(reason.unwrap().contains("code 0"), "raison de fin attendue");
+        }
+        other => panic!("fermeture attendue, obtenu : {other:?}"),
+    }
+
+    let second = SshSession::start(
+        &runtime,
+        egui::Context::default(),
+        connection(server.port, PASSWORD),
+        Some(server.fingerprint.clone()),
+        buffers,
+    );
+    wait_until("reconnexion", || {
+        matches!(second.state(), SessionState::Connected)
+    });
+    second.send(b"apres-reconnexion".to_vec());
+    wait_until("écho après reconnexion", || {
+        screen_contains(&second, "apres-reconnexion")
+    });
+    assert!(
+        screen_contains(&second, "avant-coupure"),
+        "l'écran d'avant la coupure est conservé"
+    );
+}
+
+#[test]
+fn should_record_what_the_server_displays() {
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    let directory = std::env::temp_dir().join(format!(
+        "ssh-manager-ssh-recording-{:x}",
+        rand::random::<u64>()
+    ));
+    let key = ssh_manager_vault::sealed_log::derive_log_key(&[5u8; 32]);
+    let target = connection(server.port, PASSWORD);
+    let recorder = Recorder::start(&directory, key.clone(), &target);
+    let path = recorder.path().unwrap().to_owned();
+    let session = SshSession::start(
+        &runtime,
+        egui::Context::default(),
+        target,
+        Some(server.fingerprint.clone()),
+        TerminalBuffers::new(SIZE, recorder),
+    );
+    wait_until("message d'accueil", || screen_contains(&session, "welcome"));
+    session.send(b"exit\r".to_vec());
+    wait_until("session terminée", || {
+        matches!(session.state(), SessionState::Closed { .. })
+    });
+
+    let text = crate::recordings::read_text(&path, &key, "").unwrap();
+    assert!(text.contains("\nwelcome\n"), "{text}");
+    assert!(
+        text.contains("session terminée : le shell s'est terminé (code 0)"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
 fn should_accept_the_pinned_host_key_without_learning_it_again() {
     let runtime = Runtime::new().unwrap();
     let server = start_server(&runtime);
@@ -217,7 +304,7 @@ fn should_accept_the_pinned_host_key_without_learning_it_again() {
         egui::Context::default(),
         connection(server.port, PASSWORD),
         Some(server.fingerprint.clone()),
-        SIZE,
+        TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
     wait_until("connexion établie", || {
         matches!(session.state(), SessionState::Connected)
@@ -235,7 +322,7 @@ fn should_refuse_a_server_whose_host_key_changed() {
         egui::Context::default(),
         connection(server.port, PASSWORD),
         Some(pinned.clone()),
-        SIZE,
+        TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
 
     wait_until("échec de connexion", || {
@@ -259,7 +346,7 @@ fn should_report_a_rejected_password() {
         egui::Context::default(),
         connection(server.port, "mauvais"),
         None,
-        SIZE,
+        TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
     wait_until("échec d'authentification", || {
         matches!(session.state(), SessionState::Failed(_))
@@ -285,7 +372,7 @@ fn should_report_an_unreachable_server() {
         egui::Context::default(),
         connection(port, PASSWORD),
         None,
-        SIZE,
+        TerminalBuffers::new(SIZE, Recorder::disabled()),
     );
     wait_until("échec de connexion", || {
         matches!(session.state(), SessionState::Failed(_))

@@ -7,7 +7,7 @@ use super::{Action, Workspace};
 use crate::files::FileBrowser;
 use crate::files::view::{self as files_view, BrowserView};
 use crate::session::emulator::GridSize;
-use crate::session::ssh::{SessionError, SessionState, SshSession};
+use crate::session::ssh::{SessionError, SessionState, SshSession, TerminalBuffers};
 use crate::session::view;
 use crate::settings::PasteMode;
 use crate::theme::{self, color, radius};
@@ -23,6 +23,8 @@ pub enum SessionKind {
     Terminal {
         ssh: SshSession,
         size: GridSize,
+        /// Écran et enregistrement, conservés d'une reconnexion à l'autre.
+        buffers: TerminalBuffers,
     },
     Files {
         browser: FileBrowser,
@@ -49,6 +51,10 @@ impl OpenSession {
             SessionKind::Terminal { ssh, .. } => ssh.take_learned_host_key(),
             SessionKind::Files { browser, .. } => browser.take_learned_host_key(),
         }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.kind, SessionKind::Terminal { .. })
     }
 
     fn is_files(&self) -> bool {
@@ -110,6 +116,7 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
                         };
                         let (response, close) =
                             tab(ui, active, Some(status_color(&state)), &label, true);
+                        response.context_menu(|ui| tab_menu(session, &state, ui, actions));
                         if close {
                             actions.push(Action::CloseSession(session.id));
                         } else if response.clicked() {
@@ -119,6 +126,30 @@ pub fn tab_bar(workspace: &mut Workspace, ui: &mut Ui, actions: &mut Vec<Action>
                 });
             });
         });
+}
+
+/// Menu du clic droit sur un onglet de session.
+fn tab_menu(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &mut Vec<Action>) {
+    if ui
+        .add_enabled(!state.is_live(), egui::Button::new("Reconnecter"))
+        .clicked()
+    {
+        actions.push(Action::Reconnect(session.id));
+        ui.close();
+    }
+    if ui.button("Dupliquer l'onglet").clicked() {
+        actions.push(Action::DuplicateSession(session.id));
+        ui.close();
+    }
+    if session.is_terminal() && ui.button("Exporter la session…").clicked() {
+        actions.push(Action::ExportSession(session.id));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Fermer").clicked() {
+        actions.push(Action::CloseSession(session.id));
+        ui.close();
+    }
 }
 
 /// Onglet en pastille ; renvoie la réponse et vrai si sa croix a été cliquée.
@@ -255,9 +286,46 @@ fn terminal_panel(
             ui.set_min_size(ui.available_size());
             toolbar(session, state, ui, actions);
             ui.add(egui::Separator::default().spacing(0.0));
-            if let SessionKind::Terminal { ssh, size } = &mut session.kind {
-                *size = view::show(ui, ssh, paste_mode);
+            if let SessionState::Closed { reason } = state {
+                disconnected_banner(session.id, reason.as_deref(), ui, actions);
             }
+            if let SessionKind::Terminal { ssh, size, .. } = &mut session.kind {
+                let terminal = view::show(ui, ssh, paste_mode, state.is_live());
+                *size = terminal.size;
+                if terminal.reconnect_requested {
+                    actions.push(Action::Reconnect(session.id));
+                }
+            }
+        });
+}
+
+/// Bandeau d'une session terminée : la raison et le moyen de reprendre.
+fn disconnected_banner(id: u64, reason: Option<&str>, ui: &mut Ui, actions: &mut Vec<Action>) {
+    Frame::new()
+        .fill(color::tint(color::WARNING, 28))
+        .inner_margin(Margin::symmetric(14, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("●").size(9.0).color(color::WARNING));
+                ui.label(
+                    RichText::new(format!(
+                        "Session terminée — {}",
+                        reason.unwrap_or("déconnecté")
+                    ))
+                    .font(theme::sans_semibold(13.0)),
+                );
+                ui.label(
+                    RichText::new("Appuyez sur Entrée pour vous reconnecter.")
+                        .font(theme::sans(12.0))
+                        .color(color::TEXT_MUTED),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::primary_button(ui, "Reconnecter").clicked() {
+                        actions.push(Action::Reconnect(id));
+                    }
+                });
+            });
         });
 }
 
@@ -294,8 +362,23 @@ fn toolbar(session: &OpenSession, state: &SessionState, ui: &mut Ui, actions: &m
                     if ui.add(close).on_hover_text("Fermer la session").clicked() {
                         actions.push(Action::CloseSession(session.id));
                     }
-                    if !state.is_live() && widgets::secondary_button(ui, "Reconnecter").clicked() {
+                    // Le bandeau des sessions terminal offre déjà la reconnexion.
+                    let banner_shown =
+                        session.is_terminal() && matches!(state, SessionState::Closed { .. });
+                    if !state.is_live()
+                        && !banner_shown
+                        && widgets::secondary_button(ui, "Reconnecter").clicked()
+                    {
                         actions.push(Action::Reconnect(session.id));
+                    }
+                    if session.is_terminal()
+                        && widgets::secondary_button(ui, "Exporter")
+                            .on_hover_text(
+                                "Enregistrer le texte de la session dans un fichier .txt",
+                            )
+                            .clicked()
+                    {
+                        actions.push(Action::ExportSession(session.id));
                     }
                 });
             });
