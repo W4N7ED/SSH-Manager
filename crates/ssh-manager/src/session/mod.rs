@@ -3,8 +3,10 @@
 
 pub mod emulator;
 pub mod keys;
+pub mod links;
 pub mod palette;
 pub mod private_key;
+pub mod search;
 pub mod ssh;
 pub mod terminal_theme;
 pub mod transcript;

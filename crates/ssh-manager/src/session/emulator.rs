@@ -93,6 +93,20 @@ impl Emulator {
         *lock(&self.responses) = Some(responses);
     }
 
+    /// Texte d'une ligne de la grille (historique compris), une case par caractère.
+    pub fn row_text(&self, line: Line) -> String {
+        let grid = self.term.grid();
+        if line < grid.topmost_line() || line > grid.bottommost_line() {
+            return String::new();
+        }
+        let row = &grid[line];
+        (0..grid.columns())
+            .map(|column| &row[Column(column)])
+            .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+            .map(|cell| cell.c)
+            .collect()
+    }
+
     /// Tout le texte conservé, historique compris, sans les lignes vides de fin.
     pub fn history_text(&self) -> String {
         let grid = self.term.grid();

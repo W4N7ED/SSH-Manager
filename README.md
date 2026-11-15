@@ -7,10 +7,14 @@ automatiquement le coffre et les sauvegardes.
 ## Fonctionnalités
 
 - **Terminal SSH** intégré (émulation alacritty), thèmes (8 prédéfinis + couleurs
-  personnalisées), collage au clic droit ou à Ctrl+V au choix.
+  personnalisées), collage au clic droit ou à Ctrl+V au choix ; recherche dans
+  l'historique (Ctrl+Maj+F), taille du texte à Ctrl+molette, liens ouverts par Ctrl+clic.
+- **Clés privées** OpenSSH, PEM, PKCS#8 et PuTTY, y compris protégées par une phrase
+  de passe (demandée à l'ouverture, mémorisable dans le coffre).
 - **Mosaïque** de quatre sessions (Ctrl+M) et **saisie synchronisée** (Ctrl+Maj+S).
-- **Navigateur de fichiers** SFTP et FTP/FTPS : envoi, téléchargement, dossiers,
-  suppression récursive.
+- **Navigateur de fichiers** SFTP et FTP/FTPS : envoi (y compris dossiers entiers et
+  glisser-déposer depuis l'Explorateur), téléchargement avec progression et annulation,
+  renommage (F2), droits, suppression récursive.
 - **Reconnexion** dans le même onglet (Entrée, bouton ou clic droit), écran conservé.
 - **Enregistrement des sessions** (chiffré) et export en `.txt`, fenêtre « Historique ».
 - **Connexion rapide** `user@hôte:port` dans la recherche, **palette Ctrl+K**.

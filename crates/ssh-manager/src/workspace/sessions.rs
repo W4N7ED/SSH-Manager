@@ -6,14 +6,13 @@ use egui::{Color32, CornerRadius, Frame, Margin, Rect, RichText, Sense, Stroke, 
 use ssh_manager_core::Connection;
 
 use super::mosaic::{self, Mosaic};
+use super::search_bar::{self, SearchBar};
 use super::{Action, Workspace};
 use crate::files::FileBrowser;
 use crate::files::view::{self as files_view, BrowserView};
 use crate::session::emulator::GridSize;
 use crate::session::ssh::{SessionError, SessionState, SshSession, TerminalBuffers};
-use crate::session::terminal_theme::TerminalColors;
-use crate::session::view;
-use crate::settings::{PasteMode, Settings};
+use crate::session::view::{self, TerminalOptions};
 use crate::theme::{self, color, radius};
 use crate::widgets;
 
@@ -29,27 +28,13 @@ pub enum SessionKind {
         size: GridSize,
         /// Écran et enregistrement, conservés d'une reconnexion à l'autre.
         buffers: TerminalBuffers,
+        /// Barre de recherche, quand elle est ouverte.
+        search: Option<SearchBar>,
     },
     Files {
         browser: FileBrowser,
         view: BrowserView,
     },
-}
-
-/// Préférences d'affichage des terminaux, lues une fois par image.
-#[derive(Clone, Copy)]
-pub struct TerminalPrefs {
-    pub paste_mode: PasteMode,
-    pub colors: TerminalColors,
-}
-
-impl TerminalPrefs {
-    pub fn from_settings(settings: &Settings) -> Self {
-        Self {
-            paste_mode: settings.paste_mode,
-            colors: settings.terminal_theme.colors(),
-        }
-    }
 }
 
 /// Saisie faite dans une session, à rejouer dans les sessions synchronisées.
@@ -347,7 +332,7 @@ fn tab(
 /// Affiche une session ; renvoie ce que l'utilisateur y a tapé.
 pub fn session_panel(
     session: &mut OpenSession,
-    prefs: &TerminalPrefs,
+    prefs: &TerminalOptions,
     ui: &mut Ui,
     actions: &mut Vec<Action>,
 ) -> Vec<TypedInput> {
@@ -397,7 +382,7 @@ fn connecting(ui: &mut Ui, connection: &Connection) {
 fn terminal_panel(
     session: &mut OpenSession,
     state: &SessionState,
-    prefs: &TerminalPrefs,
+    prefs: &TerminalOptions,
     ui: &mut Ui,
     actions: &mut Vec<Action>,
 ) -> Vec<TypedInput> {
@@ -413,10 +398,24 @@ fn terminal_panel(
             if let SessionState::Closed { reason } = state {
                 disconnected_banner(session.id, reason.as_deref(), ui, actions);
             }
-            if let SessionKind::Terminal { ssh, size, .. } = &mut session.kind {
-                let terminal =
-                    view::show(ui, ssh, prefs.paste_mode, &prefs.colors, state.is_live());
+            if let SessionKind::Terminal {
+                ssh, size, search, ..
+            } = &mut session.kind
+            {
+                let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+                if ui.input_mut(|input| input.consume_key(ctrl_shift, egui::Key::F)) {
+                    search.get_or_insert_default();
+                }
+                if let Some(bar) = search
+                    && search_bar::show(ui, bar, &ssh.emulator)
+                {
+                    *search = None;
+                }
+                let terminal = view::show(ui, ssh, prefs, state.is_live());
                 *size = terminal.size;
+                if let Some(font_size) = terminal.font_size_request {
+                    actions.push(Action::SetTerminalFontSize(font_size));
+                }
                 if terminal.reconnect_requested {
                     actions.push(Action::Reconnect(session.id));
                 }
@@ -434,7 +433,7 @@ pub fn mosaic_panel(
     sessions: &mut [OpenSession],
     layout: &Mosaic,
     synced: &BTreeSet<u64>,
-    prefs: &TerminalPrefs,
+    prefs: &TerminalOptions,
     ui: &mut Ui,
     actions: &mut Vec<Action>,
 ) -> Vec<TypedInput> {

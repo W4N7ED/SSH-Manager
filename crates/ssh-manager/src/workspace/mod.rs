@@ -10,6 +10,7 @@ mod mosaic;
 mod password_prompt;
 mod rail;
 mod recordings_dialog;
+mod search_bar;
 mod sessions;
 mod settings_dialog;
 mod toolbox;
@@ -32,6 +33,7 @@ use crate::session::ssh::{SshSession, TerminalBuffers, lock};
 use crate::settings::Settings;
 use crate::theme::{self, color, radius};
 
+use crate::session::view::TerminalOptions;
 use backup_dialogs::{PhraseOutcome, PhrasePrompt};
 use command_palette::{CommandPalette, PaletteOutcome};
 pub use form::ConnectionForm;
@@ -39,7 +41,7 @@ pub use list::SortState;
 use mosaic::Mosaic;
 use password_prompt::{PasswordPrompt, PromptResult, SecretKind};
 use recordings_dialog::{RecordingsChoice, RecordingsDialog};
-use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind, TerminalPrefs, TypedInput};
+use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind, TypedInput};
 use ssh_manager_vault::backup::{self, Backup};
 
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
@@ -89,6 +91,8 @@ pub enum Action {
     /// Inclut ou retire une session de la saisie synchronisée.
     ToggleSync(u64),
     SetTerminalTheme(crate::session::terminal_theme::TerminalTheme),
+    /// Taille du texte des terminaux (Ctrl+molette).
+    SetTerminalFontSize(f32),
     NewConnection {
         group: Option<String>,
     },
@@ -229,7 +233,7 @@ impl Workspace {
         sessions::tab_bar(self, ui, &mut actions);
         self.status_bar(ui);
 
-        let prefs = TerminalPrefs::from_settings(&self.settings);
+        let prefs = TerminalOptions::from_settings(&self.settings);
         let mut typed: Vec<TypedInput> = Vec::new();
         egui::CentralPanel::no_frame().show(ui, |ui| {
             Frame::new()
@@ -514,6 +518,10 @@ impl Workspace {
                 }
             }
             Action::ToggleSync(id) => self.toggle_sync(id),
+            Action::SetTerminalFontSize(size) => {
+                self.settings.terminal_font_size = size;
+                self.save_settings();
+            }
             Action::SetTerminalTheme(theme) => {
                 self.settings.terminal_theme = theme;
                 self.save_settings();
@@ -720,7 +728,12 @@ impl Workspace {
             pinned,
             buffers.clone(),
         );
-        SessionKind::Terminal { ssh, size, buffers }
+        SessionKind::Terminal {
+            ssh,
+            size,
+            buffers,
+            search: None,
+        }
     }
 
     /// Redemande un secret, puis relance la session dans le même onglet.

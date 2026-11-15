@@ -17,33 +17,54 @@ use egui::{
 
 use super::emulator::{Emulator, GridSize};
 use super::keys;
+use super::links;
 use super::palette;
 use super::ssh::{SshSession, lock};
 use super::terminal_theme::TerminalColors;
 use crate::clipboard;
-use crate::settings::PasteMode;
+use crate::settings::{PasteMode, Settings};
 use crate::theme;
 
-const FONT_SIZE: f32 = 14.0;
 const PADDING: Vec2 = Vec2::new(12.0, 10.0);
 /// Lignes parcourues par cran de molette.
 const LINES_PER_WHEEL_STEP: f32 = 3.0;
+pub const FONT_SIZE_MIN: f32 = 9.0;
+pub const FONT_SIZE_MAX: f32 = 28.0;
 
-fn font() -> FontId {
-    theme::mono(FONT_SIZE)
+/// Réglages d'affichage communs à tous les terminaux.
+#[derive(Clone, Copy)]
+pub struct TerminalOptions {
+    pub paste_mode: PasteMode,
+    pub colors: TerminalColors,
+    pub font_size: f32,
 }
 
-/// Dimensions d'une cellule, mesurées une fois sur la police chargée.
-#[derive(Clone, Copy)]
+impl TerminalOptions {
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            paste_mode: settings.paste_mode,
+            colors: settings.terminal_theme.colors(),
+            font_size: settings
+                .terminal_font_size
+                .clamp(FONT_SIZE_MIN, FONT_SIZE_MAX),
+        }
+    }
+}
+
+/// Police et dimensions d'une cellule, mesurées sur la police chargée.
+#[derive(Clone)]
 struct CellMetrics {
+    font: FontId,
     width: f32,
     height: f32,
 }
 
-fn measure(ui: &Ui) -> CellMetrics {
+fn measure(ui: &Ui, font_size: f32) -> CellMetrics {
+    let font = theme::mono(font_size);
     ui.ctx().fonts_mut(|fonts| CellMetrics {
-        width: fonts.glyph_width(&font(), 'M'),
-        height: fonts.row_height(&font()),
+        width: fonts.glyph_width(&font, 'M'),
+        height: fonts.row_height(&font),
+        font: font.clone(),
     })
 }
 
@@ -56,6 +77,8 @@ pub struct TerminalResponse {
     /// Ce que l'utilisateur a tapé ou collé, déjà envoyé à cette session :
     /// la saisie synchronisée le rejoue dans les autres.
     pub typed: Vec<Vec<u8>>,
+    /// Nouvelle taille de police demandée (Ctrl+molette).
+    pub font_size_request: Option<f32>,
 }
 
 /// Affiche la session. Hors connexion (`live` faux), l'écran reste lisible et
@@ -63,11 +86,12 @@ pub struct TerminalResponse {
 pub fn show(
     ui: &mut Ui,
     session: &SshSession,
-    paste_mode: PasteMode,
-    theme: &TerminalColors,
+    options: &TerminalOptions,
     live: bool,
 ) -> TerminalResponse {
-    let metrics = measure(ui);
+    let paste_mode = options.paste_mode;
+    let theme = &options.colors;
+    let metrics = measure(ui, options.font_size);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let grid_rect = rect.shrink2(PADDING);
     let size = GridSize {
@@ -98,7 +122,9 @@ pub fn show(
     if emulator.resize(size) {
         session.resize(size);
     }
-    handle_mouse(ui, &response, &mut emulator, grid_rect, metrics);
+    handle_mouse(ui, &response, &mut emulator, grid_rect, &metrics);
+    handle_links(ui, &response, &emulator, grid_rect, &metrics);
+    let font_size_request = zoom_request(ui, &response, options.font_size);
     let mut reconnect_requested = false;
     let mut typed = Vec::new();
     if !live {
@@ -134,7 +160,7 @@ pub fn show(
         ui,
         rect,
         grid_rect,
-        metrics,
+        &metrics,
         &emulator,
         response.has_focus() && live,
         theme,
@@ -143,6 +169,7 @@ pub fn show(
         size,
         reconnect_requested,
         typed,
+        font_size_request,
     }
 }
 
@@ -210,12 +237,59 @@ fn handle_keyboard(
     sent
 }
 
+/// Ctrl+molette sur le terminal : agrandit ou réduit le texte.
+fn zoom_request(ui: &Ui, response: &egui::Response, font_size: f32) -> Option<f32> {
+    if !response.hovered() {
+        return None;
+    }
+    let zoom = ui.input(|input| input.zoom_delta());
+    if (zoom - 1.0).abs() < f32::EPSILON {
+        return None;
+    }
+    let requested = (font_size * zoom).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+    ((requested - font_size).abs() > 0.05).then_some(requested)
+}
+
+/// Lien web sous le pointeur, et ouverture par Ctrl+clic.
+fn handle_links(
+    ui: &Ui,
+    response: &egui::Response,
+    emulator: &Emulator,
+    grid_rect: Rect,
+    metrics: &CellMetrics,
+) {
+    let Some(pointer) = response.hover_pos() else {
+        return;
+    };
+    if !ui.input(|input| input.modifiers.command) {
+        return;
+    }
+    let relative = pointer - grid_rect.min;
+    if relative.x < 0.0 || relative.y < 0.0 {
+        return;
+    }
+    let row = (relative.y / metrics.height) as i32;
+    let column = (relative.x / metrics.width) as usize;
+    let line = Line(row - emulator.term().grid().display_offset() as i32);
+    let Some(url) = links::url_at(&emulator.row_text(line), column) else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        links::open(&url);
+    } else {
+        response
+            .clone()
+            .on_hover_text(format!("Ctrl+clic : ouvrir {url}"));
+    }
+}
+
 fn handle_mouse(
     ui: &Ui,
     response: &egui::Response,
     emulator: &mut Emulator,
     grid_rect: Rect,
-    metrics: CellMetrics,
+    metrics: &CellMetrics,
 ) {
     let display_offset = emulator.term().grid().display_offset();
     let to_point = |position: Pos2| -> (Point, Side) {
@@ -269,7 +343,7 @@ fn paint(
     ui: &Ui,
     rect: Rect,
     grid_rect: Rect,
-    metrics: CellMetrics,
+    metrics: &CellMetrics,
     emulator: &Emulator,
     focused: bool,
     theme: &TerminalColors,
@@ -318,7 +392,7 @@ fn paint(
                 target.left_top(),
                 egui::Align2::LEFT_TOP,
                 cell.c,
-                font(),
+                metrics.font.clone(),
                 foreground,
             );
         }
