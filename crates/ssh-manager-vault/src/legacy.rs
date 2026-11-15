@@ -66,6 +66,10 @@ pub(crate) struct LegacyConnection {
     /// Absent des fichiers Electron ; transporté par les sauvegardes de la version Rust.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     key_passphrase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jump_connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_forwards: Vec<ssh_manager_core::LocalForward>,
     #[serde(default)]
     ftp_secure: Option<bool>,
     group: Option<String>,
@@ -239,6 +243,8 @@ impl LegacyConnection {
             password: connection.password.clone(),
             private_key_path: connection.private_key_path.clone(),
             key_passphrase: connection.key_passphrase.clone(),
+            jump_connection_id: connection.jump_connection_id.clone(),
+            local_forwards: connection.local_forwards.clone(),
             ftp_secure: Some(connection.ftp_secure),
             group: connection.group.clone(),
             favorite: Some(connection.favorite),
@@ -266,6 +272,8 @@ pub(crate) fn convert_connection(legacy: LegacyConnection) -> Connection {
         key_passphrase: legacy
             .key_passphrase
             .filter(|passphrase| !passphrase.is_empty()),
+        jump_connection_id: legacy.jump_connection_id,
+        local_forwards: legacy.local_forwards,
         ftp_secure: legacy.ftp_secure.unwrap_or(false),
         group: legacy.group.filter(|group| !group.is_empty()),
         favorite: legacy.favorite.unwrap_or(false),

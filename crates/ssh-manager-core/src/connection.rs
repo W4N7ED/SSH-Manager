@@ -43,6 +43,26 @@ impl ConnectionKind {
     }
 }
 
+/// Tunnel local (`ssh -L`) : un port de ce poste relayé, par le serveur SSH,
+/// vers `remote_host:remote_port` (vu depuis le serveur).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalForward {
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+}
+
+impl LocalForward {
+    /// « 8080 → db.internal:5432 ».
+    pub fn describe(&self) -> String {
+        format!(
+            "{} → {}:{}",
+            self.local_port, self.remote_host, self.remote_port
+        )
+    }
+}
+
 /// Une connexion enregistrée dans le coffre.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +82,13 @@ pub struct Connection {
     /// Phrase de passe de la clé privée, si elle est chiffrée et mémorisée.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_passphrase: Option<String>,
+    /// Connexion SSH enregistrée par laquelle passer pour joindre ce serveur
+    /// (rebond, `ProxyJump`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_connection_id: Option<String>,
+    /// Tunnels locaux ouverts tant que le terminal est connecté.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_forwards: Vec<LocalForward>,
     /// FTP uniquement : FTPS (TLS explicite).
     #[serde(default)]
     pub ftp_secure: bool,
@@ -92,6 +119,8 @@ impl Connection {
             password: None,
             private_key_path: None,
             key_passphrase: None,
+            jump_connection_id: None,
+            local_forwards: Vec::new(),
             ftp_secure: false,
             group: None,
             favorite: false,

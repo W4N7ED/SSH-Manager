@@ -8,6 +8,7 @@ pub mod connection;
 pub mod format;
 pub mod library;
 pub mod password;
+pub mod ssh_config;
 
-pub use connection::{Connection, ConnectionKind};
+pub use connection::{Connection, ConnectionKind, LocalForward};
 pub use library::{ConnectionLibrary, GroupFilter, KindFilter};
