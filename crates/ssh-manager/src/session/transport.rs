@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client::{self, Handle};
-use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate, load_secret_key};
+use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use ssh_manager_core::Connection;
+
+use super::private_key::{self, KeyLoadError};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Message de maintien : évite qu'un pare-feu ferme une session inactive.
@@ -21,6 +23,9 @@ pub enum SessionError {
     Authentication,
     #[error("clé privée illisible : {0}")]
     PrivateKey(String),
+    /// La clé privée est chiffrée : phrase absente (`wrong` faux) ou incorrecte.
+    #[error("phrase de passe de la clé privée requise")]
+    KeyPassphrase { wrong: bool },
     #[error("connexion impossible : {0}")]
     Connect(String),
 }
@@ -178,8 +183,15 @@ async fn connect(
 async fn authenticate(handle: &mut SshHandle, connection: &Connection) -> Result<(), SessionError> {
     let accepted = match &connection.private_key_path {
         Some(path) => {
-            let key = load_secret_key(path, None)
-                .map_err(|error| SessionError::PrivateKey(error.to_string()))?;
+            let key = private_key::load(
+                std::path::Path::new(path),
+                connection.key_passphrase.as_deref(),
+            )
+            .map_err(|error| match error {
+                KeyLoadError::PassphraseRequired => SessionError::KeyPassphrase { wrong: false },
+                KeyLoadError::WrongPassphrase => SessionError::KeyPassphrase { wrong: true },
+                KeyLoadError::Unreadable(reason) => SessionError::PrivateKey(reason),
+            })?;
             let hash = handle
                 .best_supported_rsa_hash()
                 .await

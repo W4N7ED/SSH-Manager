@@ -27,6 +27,7 @@ pub struct ConnectionForm {
     editing: bool,
     port_text: String,
     password_text: String,
+    passphrase_text: String,
     authentication: Authentication,
     new_group: String,
     errors: Vec<&'static str>,
@@ -43,6 +44,7 @@ impl ConnectionForm {
         Self {
             port_text: connection.port.to_string(),
             password_text: connection.password.clone().unwrap_or_default(),
+            passphrase_text: connection.key_passphrase.clone().unwrap_or_default(),
             authentication,
             new_group: String::new(),
             errors: Vec::new(),
@@ -241,6 +243,15 @@ impl ConnectionForm {
                         }
                     }
                 });
+                ui.add_space(6.0);
+                ui.add(
+                    widgets::text_field(
+                        &mut self.passphrase_text,
+                        "phrase de passe de la clé (si chiffrée — vide : demandée à l'ouverture)",
+                    )
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+                );
                 self.key_generation(ui, clipboard, settings);
             }
         }
@@ -318,6 +329,12 @@ impl ConnectionForm {
                 Some(self.password_text.clone()).filter(|password| !password.is_empty())
             }
             Authentication::PrivateKey => None,
+        };
+        connection.key_passphrase = match self.authentication {
+            Authentication::PrivateKey => {
+                Some(self.passphrase_text.clone()).filter(|passphrase| !passphrase.is_empty())
+            }
+            Authentication::Password => None,
         };
         if self.authentication == Authentication::Password || connection.kind == ConnectionKind::Ftp
         {

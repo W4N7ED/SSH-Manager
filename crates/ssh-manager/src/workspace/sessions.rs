@@ -715,6 +715,21 @@ fn failure(session: &OpenSession, error: &SessionError, ui: &mut Ui, actions: &m
                             actions.push(Action::RetryWithPassword(session.id));
                         }
                     }
+                    SessionError::KeyPassphrase { wrong } => {
+                        let explanation = if *wrong {
+                            "La phrase de passe de la clé privée est incorrecte."
+                        } else {
+                            "La clé privée est protégée par une phrase de passe."
+                        };
+                        ui.label(explanation);
+                        ui.add_space(12.0);
+                        if widgets::primary_button(ui, "Saisir la phrase de passe").clicked() {
+                            actions.push(Action::RetryWithKeyPassphrase {
+                                session: session.id,
+                                wrong: *wrong,
+                            });
+                        }
+                    }
                     other => {
                         ui.label(RichText::new(other.to_string()).font(theme::mono(12.0)).color(color::TEXT_MUTED));
                     }

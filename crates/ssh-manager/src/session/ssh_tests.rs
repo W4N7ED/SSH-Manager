@@ -41,6 +41,20 @@ impl server::Handler for EchoShell {
         })
     }
 
+    /// Toute clé dont la signature est vérifiée est acceptée : ces tests
+    /// portent sur la lecture de la clé côté client, pas sur l'autorisation.
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        _key: server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        Ok(if user == USER {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
@@ -293,6 +307,79 @@ fn should_record_what_the_server_displays() {
         "{text}"
     );
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Écrit une clé Ed25519 chiffrée par `passphrase` dans un fichier temporaire.
+fn encrypted_key_file(passphrase: &str) -> std::path::PathBuf {
+    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+        .unwrap()
+        .encrypt(&mut rand::rng(), passphrase)
+        .unwrap();
+    let path =
+        std::env::temp_dir().join(format!("ssh-manager-e2e-key-{:x}", rand::random::<u64>()));
+    let text = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap();
+    std::fs::write(&path, text.as_bytes()).unwrap();
+    path
+}
+
+fn key_connection(port: u16, key: &std::path::Path, passphrase: Option<&str>) -> Connection {
+    Connection {
+        password: None,
+        private_key_path: Some(key.display().to_string()),
+        key_passphrase: passphrase.map(str::to_owned),
+        ..connection(port, PASSWORD)
+    }
+}
+
+fn start_terminal(runtime: &Runtime, connection: Connection, pinned: String) -> SshSession {
+    SshSession::start(
+        runtime,
+        egui::Context::default(),
+        connection,
+        Some(pinned),
+        TerminalBuffers::new(SIZE, Recorder::disabled()),
+    )
+}
+
+#[test]
+fn should_connect_with_an_encrypted_key_and_its_passphrase() {
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    let key = encrypted_key_file("phrase de test");
+    let session = start_terminal(
+        &runtime,
+        key_connection(server.port, &key, Some("phrase de test")),
+        server.fingerprint.clone(),
+    );
+    wait_until("connexion établie", || {
+        matches!(session.state(), SessionState::Connected)
+    });
+    std::fs::remove_file(key).unwrap();
+}
+
+#[test]
+fn should_ask_for_the_passphrase_then_flag_a_wrong_one() {
+    let runtime = Runtime::new().unwrap();
+    let server = start_server(&runtime);
+    let key = encrypted_key_file("phrase de test");
+    for (passphrase, wrong) in [(None, false), (Some("mauvaise"), true)] {
+        let session = start_terminal(
+            &runtime,
+            key_connection(server.port, &key, passphrase),
+            server.fingerprint.clone(),
+        );
+        wait_until("échec de connexion", || {
+            matches!(session.state(), SessionState::Failed(_))
+        });
+        assert!(
+            matches!(session.state(), SessionState::Failed(SessionError::KeyPassphrase { wrong: flagged }) if flagged == wrong),
+            "phrase {passphrase:?} : {:?}",
+            session.state()
+        );
+    }
+    std::fs::remove_file(key).unwrap();
 }
 
 #[test]

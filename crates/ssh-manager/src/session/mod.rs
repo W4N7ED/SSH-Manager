@@ -4,6 +4,7 @@
 pub mod emulator;
 pub mod keys;
 pub mod palette;
+pub mod private_key;
 pub mod ssh;
 pub mod terminal_theme;
 pub mod transcript;

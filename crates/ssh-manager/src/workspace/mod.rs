@@ -37,7 +37,7 @@ use command_palette::{CommandPalette, PaletteOutcome};
 pub use form::ConnectionForm;
 pub use list::SortState;
 use mosaic::Mosaic;
-use password_prompt::{PasswordPrompt, PromptResult};
+use password_prompt::{PasswordPrompt, PromptResult, SecretKind};
 use recordings_dialog::{RecordingsChoice, RecordingsDialog};
 use sessions::{ActiveTab, INITIAL_SIZE, OpenSession, SessionKind, TerminalPrefs, TypedInput};
 use ssh_manager_vault::backup::{self, Backup};
@@ -111,6 +111,11 @@ pub enum Action {
     DuplicateSession(u64),
     ExportSession(u64),
     RetryWithPassword(u64),
+    /// La clé privée est chiffrée : redemander sa phrase de passe.
+    RetryWithKeyPassphrase {
+        session: u64,
+        wrong: bool,
+    },
     TrustHostKey {
         session: u64,
         fingerprint: String,
@@ -316,15 +321,21 @@ impl Workspace {
             self.password_prompt = None;
             if let PromptResult::Confirmed {
                 connection,
+                kind,
                 remember,
             } = result
             {
-                // Seul le mot de passe est enregistré : la connexion a pu être
+                // Seul le secret saisi est enregistré : la connexion a pu être
                 // ouverte sous un autre protocole (SSH ouverte en SFTP).
                 if remember {
-                    self.data
-                        .library
-                        .set_password(&connection.id, connection.password.clone());
+                    let library = &mut self.data.library;
+                    match kind {
+                        SecretKind::Password => {
+                            library.set_password(&connection.id, connection.password.clone());
+                        }
+                        SecretKind::KeyPassphrase { .. } => library
+                            .set_key_passphrase(&connection.id, connection.key_passphrase.clone()),
+                    }
                     self.persist();
                 }
                 match self.reconnect_after_prompt.take() {
@@ -508,10 +519,13 @@ impl Workspace {
                 self.save_settings();
             }
             Action::CloseSession(id) => self.close_session(id),
-            Action::Reconnect(id) => self.reconnect(id, false),
+            Action::Reconnect(id) => self.restart_in_place(id, None),
             Action::DuplicateSession(id) => self.duplicate_session(id),
             Action::ExportSession(id) => self.export_session(id),
-            Action::RetryWithPassword(id) => self.reconnect(id, true),
+            Action::RetryWithPassword(id) => self.reconnect_asking(id, SecretKind::Password),
+            Action::RetryWithKeyPassphrase { session, wrong } => {
+                self.reconnect_asking(session, SecretKind::KeyPassphrase { wrong });
+            }
             Action::TrustHostKey {
                 session,
                 fingerprint,
@@ -628,6 +642,11 @@ impl Workspace {
     fn open_connection(&mut self, connection: Connection) {
         if connection.needs_password_prompt() {
             self.password_prompt = Some(PasswordPrompt::new(connection));
+        } else if key_passphrase_missing(&connection) {
+            // Demandée avant de se connecter : sinon le serveur verrait d'abord
+            // une tentative vouée à l'échec.
+            let kind = SecretKind::KeyPassphrase { wrong: false };
+            self.password_prompt = Some(PasswordPrompt::asking(connection, kind));
         } else {
             self.start_session(connection);
         }
@@ -704,19 +723,18 @@ impl Workspace {
         SessionKind::Terminal { ssh, size, buffers }
     }
 
-    /// Relance une session dans le même onglet, avec un nouveau mot de passe si demandé.
-    fn reconnect(&mut self, id: u64, ask_password: bool) {
+    /// Redemande un secret, puis relance la session dans le même onglet.
+    fn reconnect_asking(&mut self, id: u64, kind: SecretKind) {
         let Some(session) = self.sessions.iter().find(|session| session.id == id) else {
             return;
         };
-        if ask_password {
-            let mut connection = session.connection.clone();
-            connection.password = None;
-            self.reconnect_after_prompt = Some(id);
-            self.password_prompt = Some(PasswordPrompt::new(connection));
-        } else {
-            self.restart_in_place(id, None);
+        let mut connection = session.connection.clone();
+        match kind {
+            SecretKind::Password => connection.password = None,
+            SecretKind::KeyPassphrase { .. } => connection.key_passphrase = None,
         }
+        self.reconnect_after_prompt = Some(id);
+        self.password_prompt = Some(PasswordPrompt::asking(connection, kind));
     }
 
     /// Reconnecte l'onglet sans le déplacer. Un terminal garde son écran, son
@@ -962,7 +980,7 @@ impl Workspace {
         tracing::warn!(%host, %fingerprint, "host key replaced at the user's request");
         self.data.host_keys.insert(host, fingerprint);
         self.persist();
-        self.reconnect(id, false);
+        self.restart_in_place(id, None);
     }
 
     fn status_bar(&self, ui: &mut Ui) {
@@ -1047,6 +1065,16 @@ impl Workspace {
                     });
             });
     }
+}
+
+/// Vrai si la clé privée de la connexion est chiffrée et qu'aucune phrase
+/// de passe n'est mémorisée.
+fn key_passphrase_missing(connection: &Connection) -> bool {
+    connection.key_passphrase.is_none()
+        && connection
+            .private_key_path
+            .as_deref()
+            .is_some_and(|path| crate::session::private_key::requires_passphrase(Path::new(path)))
 }
 
 pub fn now_millis() -> i64 {
