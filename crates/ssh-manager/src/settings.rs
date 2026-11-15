@@ -44,6 +44,8 @@ pub struct Settings {
     pub auto_reconnect: bool,
     /// Durée de conservation des enregistrements, en jours (`None` : toujours).
     pub recordings_retention_days: Option<u32>,
+    /// Interroge GitHub au démarrage pour signaler une nouvelle version.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +59,7 @@ impl Default for Settings {
             terminal_font_size: 14.0,
             auto_reconnect: true,
             recordings_retention_days: None,
+            check_updates: true,
         }
     }
 }
@@ -127,6 +130,7 @@ mod tests {
             terminal_font_size: 16.0,
             auto_reconnect: false,
             recordings_retention_days: Some(90),
+            check_updates: false,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);

@@ -39,6 +39,8 @@ pub fn show(ctx: &egui::Context, settings: &mut Settings, actions: &mut Vec<Acti
                     recording_section(ui, settings);
                     ui.add_space(18.0);
                     backup_section(ui, actions);
+                    ui.add_space(18.0);
+                    updates_section(ui, settings);
                 });
 
             ui.add_space(20.0);
@@ -139,6 +141,20 @@ fn recording_section(ui: &mut egui::Ui, settings: &mut Settings) {
     );
     ui.add_space(4.0);
     retention_picker(ui, settings);
+}
+
+fn updates_section(ui: &mut egui::Ui, settings: &mut Settings) {
+    widgets::micro_label(ui, "Mises à jour");
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut settings.check_updates,
+        RichText::new("Signaler une nouvelle version au démarrage").font(theme::sans(13.0)),
+    );
+    ui.label(
+        RichText::new("Une seule requête vers GitHub, sans aucune donnée personnelle. Rien n'est téléchargé ni installé sans vous.")
+            .font(theme::sans(12.0))
+            .color(color::TEXT_DIM),
+    );
 }
 
 fn backup_section(ui: &mut egui::Ui, actions: &mut Vec<Action>) {

@@ -2,11 +2,8 @@
 //! par le magasin de Windows).
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use rustls::ClientConfig;
-use rustls_platform_verifier::BuilderVerifierExt;
 use ssh_manager_core::Connection;
 use suppaftp::list::{File as ListedFile, PosixPexQuery};
 use suppaftp::tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream};
@@ -27,14 +24,10 @@ fn failed(context: &str, error: impl std::fmt::Display) -> FsError {
 }
 
 fn tls_connector() -> Result<AsyncRustlsConnector, FsError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .and_then(|builder| builder.with_platform_verifier())
-        .map_err(|error| failed("configuration TLS impossible", error))?
-        .with_no_client_auth();
+    let config = crate::tls::client_config()
+        .map_err(|error| failed("configuration TLS impossible", error))?;
     Ok(AsyncRustlsConnector::from(
-        tokio_rustls::TlsConnector::from(Arc::new(config)),
+        tokio_rustls::TlsConnector::from(config),
     ))
 }
 

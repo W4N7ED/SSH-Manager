@@ -21,10 +21,12 @@ impl Workspace {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     live_sessions_label(ui, live);
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        storage_labels,
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        storage_labels(ui);
+                        if let Some(release) = lock(&self.available_update).clone() {
+                            update_link(ui, &release);
+                        }
+                    });
                 });
             });
     }
@@ -95,4 +97,21 @@ fn storage_labels(ui: &mut Ui) {
             "Données : {}",
             ssh_manager_vault::paths::data_dir().display()
         ));
+}
+
+/// « ↑ Version 2.1.0 disponible » : ouvre la page de la version.
+fn update_link(ui: &mut Ui, release: &crate::update_check::Release) {
+    let link = egui::Button::new(
+        RichText::new(format!("↑ Version {} disponible", release.version))
+            .font(theme::mono(11.0))
+            .color(color::ACCENT_LIGHT),
+    )
+    .frame(false);
+    if ui
+        .add(link)
+        .on_hover_text("Ouvrir la page de la version pour télécharger l'installeur")
+        .clicked()
+    {
+        crate::session::links::open(&release.page_url);
+    }
 }

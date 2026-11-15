@@ -26,6 +26,7 @@ mod top_bar;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{CornerRadius, Frame, Margin, RichText, Ui};
@@ -98,6 +99,8 @@ pub struct Workspace {
     confirm_plain_export: bool,
     /// Onglet à relancer en place une fois le mot de passe saisi.
     reconnect_after_prompt: Option<u64>,
+    /// Version plus récente publiée, trouvée au démarrage.
+    available_update: Arc<std::sync::Mutex<Option<crate::update_check::Release>>>,
 }
 
 impl Workspace {
@@ -132,12 +135,34 @@ impl Workspace {
             synced: BTreeSet::new(),
             confirm_plain_export: false,
             reconnect_after_prompt: None,
+            available_update: Arc::default(),
         };
         if let Some(text) = notice {
             workspace.notify(text, true);
         }
         workspace.purge_expired_recordings();
+        workspace.check_for_update();
         workspace
+    }
+
+    /// Lance en arrière-plan la vérification de version, si elle est activée.
+    fn check_for_update(&self) {
+        if !self.settings.check_updates {
+            return;
+        }
+        let found = self.available_update.clone();
+        let ctx = self.ctx.clone();
+        self.runtime.spawn(async move {
+            match crate::update_check::newer_release().await {
+                Ok(Some(release)) => {
+                    tracing::info!(version = %release.version, "a newer version is available");
+                    *lock(&found) = Some(release);
+                    ctx.request_repaint();
+                }
+                Ok(None) => tracing::info!("application is up to date"),
+                Err(error) => tracing::warn!(%error, "update check failed"),
+            }
+        });
     }
 
     pub fn notify(&mut self, text: impl Into<String>, ok: bool) {
