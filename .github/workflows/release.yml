@@ -1,0 +1,47 @@
+# Publie une version : pousser un tag « vX.Y.Z » (égal à la version du
+# workspace) produit l'installeur et l'exécutable portable, joints à une
+# Release GitHub.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache de compilation
+        uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Version du tag = version du workspace
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          $version = [regex]::Match($manifest, '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Le tag ${{ github.ref_name }} ne correspond pas à la version $version de Cargo.toml"
+          }
+
+      - name: Livrables (NSIS est présent sur les images Windows de GitHub)
+        shell: pwsh
+        run: ./scripts/build-release.ps1
+
+      - name: Release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/SSH-Manager-Setup-*.exe
+            dist/SSH-Manager-*-Portable.exe
+          generate_release_notes: true

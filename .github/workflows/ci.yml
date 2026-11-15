@@ -1,0 +1,35 @@
+# Vérifications à chaque push et pull request : format, analyse, tests.
+# Les tests SSH/SFTP de bout en bout tournent contre un serveur lancé en local
+# par les tests eux-mêmes ; aucun secret n'est nécessaire.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache de compilation
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Analyse (clippy)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
