@@ -88,6 +88,12 @@ impl Vault {
         &self.path
     }
 
+    /// Clé des enregistrements de session, dérivée de la clé du coffre : les
+    /// enregistrements ne sont lisibles qu'une fois le coffre ouvert.
+    pub fn recording_key(&self) -> VaultKey {
+        crate::sealed_log::derive_log_key(&self.key)
+    }
+
     /// Ouvre le coffre sans intervention, grâce à la clé protégée par DPAPI.
     /// Renvoie [`VaultError::RecoveryPhraseRequired`] si la clé n'est pas lisible
     /// sur ce poste.

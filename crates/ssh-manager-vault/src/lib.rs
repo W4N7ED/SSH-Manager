@@ -19,6 +19,7 @@ pub mod error;
 pub mod legacy;
 pub mod paths;
 pub mod recovery;
+pub mod sealed_log;
 pub mod vault;
 
 #[cfg(windows)]

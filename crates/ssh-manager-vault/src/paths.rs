@@ -15,6 +15,11 @@ pub fn vault_file() -> PathBuf {
     data_dir().join("vault.json")
 }
 
+/// Enregistrements chiffrés des sessions terminal.
+pub fn recordings_dir() -> PathBuf {
+    data_dir().join("recordings")
+}
+
 /// Dossier de l'application Electron.
 pub fn legacy_dir() -> PathBuf {
     dirs::config_dir()
